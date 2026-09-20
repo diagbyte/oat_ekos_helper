@@ -94,7 +94,6 @@ problems += step("simulated power cycle", lambda: (w.indi.meade("&SHP#"),
                                                    setattr(w, "dec_zero_shift", 0),
                                                    setattr(w, "dec_odometer_valid", True)), 2.0)
 problems += step("restore saved DEC Home", lambda: w.restore_saved_dec_home(confirm=False), 8.0)
-problems += step("DEC power-off position", w.dec_park_for_power_off, 8.0)
 problems += step("PAA log diagnosis", w.diagnose_paa_log, 3.0)
 problems += step("AutoPA start", w.start_autopa_watch, 3.0)
 problems += step("AutoPA stop", w.stop_autopa_watch, 1.0)

@@ -4,14 +4,13 @@ A KStars/Ekos extension for the [OpenAstroTracker](https://openastrotech.com/)
 (OAT/OAM), aimed at Linux users who run their mount from KStars/Ekos — on a
 Raspberry Pi, Astroberry, StellarMate or a desktop.
 
-`OATControl`, the official desktop tool, is Windows only. This extension covers
-the same ground from inside Ekos, and adds the parts a sensorless-DEC OAT needs
-every session: homing, a shutdown position, and automatic polar-alignment
-correction driven by Ekos' own PAA measurements.
+Everything needed during a session lives inside Ekos: homing, a shutdown
+position, firmware maintenance, and automatic polar-alignment correction driven
+by Ekos' own PAA measurements - including the parts a sensorless-DEC OAT needs
+every night.
 
 > **Unofficial community project.** Not affiliated with or endorsed by
-> OpenAstroTech, and not related to their Windows tool OATControl. It commands
-> real hardware — read the safety notes below.
+> OpenAstroTech. It commands real hardware — read the safety notes below.
 
 ## What it does
 
@@ -28,7 +27,8 @@ correction driven by Ekos' own PAA measurements.
   ALT/AZ motors automatically, with direction, per-axis and runaway guards
 - Mini controller (buttons or keyboard), slew-rate selection, tracking trim
 - Mount monitor with the firmware's own DEC limits, target reachability check
-- Plate-solve axis calibration that can write steps/degree back to the mount
+- Plate-solve axis calibration that can write steps/degree back to the mount,
+  plus the one-off motor direction checks
 - Read-only diagnostics
 
 The window opens with three tabs; the rest is behind the **Advanced** toggle.

@@ -61,8 +61,10 @@ Two rules that keep the UI responsive:
   function handed to `run_async()`; the Meade channel is serialized and a poll
   may be holding it.
 - UI strings are English literals in the code. Static widget text is translated
-  automatically after the window is built; for text you set at runtime, wrap it
-  in `_()`.
+  automatically after the window is built; anything set at runtime - toggle
+  labels, dialog titles and bodies, combo items added later - must be wrapped in
+  `_()`. `tests/test_i18n_coverage.py` runs the UI in Korean and fails on
+  anything left in English.
 
 Please add or extend a test when you touch homing, the PAA watcher or anything
 that writes to EEPROM.

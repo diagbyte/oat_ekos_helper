@@ -48,7 +48,7 @@ def pump(seconds):
 pump(3.0)
 # put the mount's clock 7 hours out, the way it was found in the field
 # (a server left running by an earlier test may already hold a good value)
-w.indi.meade("@SHL065722#")
+w.indi.meade("@Sg-127*00#")   # the convention the mount does not want: 7 h out
 print("mount LST before sync:", w.indi.meade(":XGL#").strip(), "(stale on purpose)")
 drift = w.mount_lst_drift_minutes()
 print("drift detected: %.0f min" % drift[0])
@@ -84,7 +84,7 @@ print("set home status:", w.dec_manual_status.text()[:60])
 assert not answers
 
 # the mismatch must be repairable, not just reported
-w.indi.meade("@SHL065722#")
+w.indi.meade("@Sg-127*00#")
 drift_bad = w.mount_lst_drift_minutes()
 print("clock knocked out again: %.0f min" % drift_bad[0])
 w.repair_mount_clock()

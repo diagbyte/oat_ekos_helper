@@ -44,7 +44,7 @@ import zipfile
 import threading
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 from xml.sax.saxutils import escape
@@ -52,7 +52,7 @@ from xml.sax.saxutils import escape
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "OAT Helper"
-VERSION = "0.5.5"
+VERSION = "0.6.1"
 DEFAULT_DEVICE = "LX200 OpenAstroTech"
 CONFIG_DIR = Path.home() / ".config" / "oat-helper"
 DATA_DIR = Path.home() / ".local" / "share" / "oat-helper"
@@ -847,9 +847,8 @@ class OATHelper(QtWidgets.QMainWindow):
         self.ha_sync_busy = False
         self.home_adjust_busy = False
         self.set_home_busy = False
-        # Firmware version gating.  OATControl enables features per firmware
-        # build; do the same so unsupported buttons are visibly disabled
-        # instead of silently returning "0".
+        # Firmware version gating: disable buttons the connected build cannot
+        # serve instead of letting them silently return "0".
         self.firmware_version_text = ""
         self.firmware_version_num = 0
         self.dec_limits_firmware = None   # (lower_deg, upper_deg) from :XGDL#
@@ -916,8 +915,7 @@ class OATHelper(QtWidgets.QMainWindow):
             "language": "auto", "indi_host": "127.0.0.1", "indi_port": 7624, "device": DEFAULT_DEVICE,
             "ra_direction": "R", "dec_direction": "U", "home_range": 30,
             "accuracy_arcsec": 60.0, "alt_offset_arcmin": 0.0, "az_offset_arcmin": 0.0,
-            "max_move_arcmin": 30.0, "invert_alt": False, "invert_az": False,
-            "dec_manual_invert": False,
+            "max_move_arcmin": 30.0,
             "dec_steps_per_degree_fallback": 314.1666667,
             "ra_limit_left_h": 5.0, "ra_limit_right_h": 7.0,
             "ra_physical_limit_h": 7.0, "dec_limit_down_deg": 0.0, "dec_limit_up_deg": 0.0,
@@ -926,7 +924,7 @@ class OATHelper(QtWidgets.QMainWindow):
             "ekos_log_dir": "",
             # "clear": SET HOME zeroes the firmware DEC homing offset so Ekos
             # Park stops at Home.  "eeprom": store the power-on->Home delta on
-            # the mount like OATControl does (survives a tool reinstall, but
+            # the mount (survives a tool reinstall, but
             # firmware Park then moves DEC by -offset, so use the tool's DEC Park).
             "dec_home_offset_mode": "clear",
             "autopa_wait_two_solutions": True,
@@ -1019,9 +1017,6 @@ class OATHelper(QtWidgets.QMainWindow):
             "alt_offset_arcmin": self.alt_offset.value(),
             "az_offset_arcmin": self.az_offset.value(),
             "max_move_arcmin": self.max_move.value(),
-            "invert_alt": self.invert_alt.isChecked(),
-            "invert_az": self.invert_az.isChecked(),
-            "dec_manual_invert": self.dec_manual_invert.isChecked(),
         })
         if hasattr(self, "tabs"):
             self.cfg.update({
@@ -1147,7 +1142,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if hasattr(self, "advanced_toggle"):
             self.advanced_toggle.blockSignals(True)
             self.advanced_toggle.setChecked(not simple)
-            self.advanced_toggle.setText(_("Advanced ▾") if not simple else "Advanced ▸")
+            self.advanced_toggle.setText(_("Advanced ▾") if not simple else _("Advanced ▸"))
             self.advanced_toggle.blockSignals(False)
 
     def _hint(self, text, warn=False):
@@ -1251,7 +1246,7 @@ class OATHelper(QtWidgets.QMainWindow):
         rescan.clicked.connect(self.rescan_devices)
         cg.addWidget(rescan)
         self.lang_box = QtWidgets.QComboBox()
-        self.lang_box.addItem("Language: auto", "auto")
+        self.lang_box.addItem(_("Language: auto"), "auto")
         for code, label in (("en", "English"), ("ko", "한국어")):
             if code == "en" or code in available_languages():
                 self.lang_box.addItem(label, code)
@@ -1262,7 +1257,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self.conn_settings.setVisible(False)
         self.settings_btn.toggled.connect(self.conn_settings.setVisible)
         self.settings_btn.toggled.connect(
-            lambda on: self.settings_btn.setText(_("⚙ Settings ▾") if on else "⚙ Settings ▸"))
+            lambda on: self.settings_btn.setText(_("⚙ Settings ▾") if on else _("⚙ Settings ▸")))
         outer.addWidget(self.conn_settings)
 
         # --- tabs and log share the remaining height, user-resizable ---------
@@ -1345,7 +1340,7 @@ class OATHelper(QtWidgets.QMainWindow):
     def _on_log_toggled(self, on):
         """Collapse/expand the log and give the freed height back to the tabs."""
         self.log_box.setVisible(on)
-        self.log_toggle.setText(("▾ " if on else "▸ ") + "Log")
+        self.log_toggle.setText(("▾ " if on else "▸ ") + _("Log"))
         if not hasattr(self, "splitter"):
             return
         sizes = self.splitter.sizes()
@@ -1427,8 +1422,7 @@ class OATHelper(QtWidgets.QMainWindow):
         g.addWidget(paa_hint,5,0,1,4)
         v.addWidget(box)
 
-        # Pre-session checklist (OATControl has an editable one shown on
-        # connect).  Physical checks the software cannot verify.
+        # Pre-session checklist: the physical checks the software cannot verify.
         chk = QtWidgets.QGroupBox("Field checklist")
         cv = QtWidgets.QVBoxLayout(chk); cv.setSpacing(2)
         self.site_angle_label = QtWidgets.QLabel("Waiting for the site from Ekos...")
@@ -1520,17 +1514,30 @@ class OATHelper(QtWidgets.QMainWindow):
         self._save_checklist_state()
 
     def edit_checklist(self):
-        current = "\n".join(self.cfg.get("checklist") or [])
+        """Edit the checklist items.
+
+        The boxes on screen are already translated, so the editor starts from
+        what is actually shown rather than the English defaults kept in the
+        config - otherwise a Korean UI opens an English editor.
+        """
+        shown = [box.text() for box in getattr(self, "checklist_boxes", []) if not box.isHidden()]
+        current = "\n".join(shown or (self.cfg.get("checklist") or []))
         text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self, "Edit checklist", "Enter one item per line:", current)
+            self, _("Edit checklist"), _("Enter one item per line:"), current)
         if not ok:
             return
         items = [line.strip() for line in text.splitlines() if line.strip()]
         self.cfg["checklist"] = items
         self.cfg["checklist_done"] = []
         self.save_config()
+        for box in getattr(self, "checklist_boxes", []):
+            box.setChecked(False)
+            box.setVisible(False)
+        for box, item in zip(self.checklist_boxes, items):
+            box.setText(item)
+            box.setVisible(True)
         QtWidgets.QMessageBox.information(
-            self, _("Checklist"), "Saved. The new items appear the next time the tool starts.")
+            self, _("Edit checklist"), _("Saved."))
 
     def _set_wizard_label(self, label, text, good=False, warn=False):
         if not hasattr(self, label):
@@ -1693,8 +1700,6 @@ class OATHelper(QtWidgets.QMainWindow):
             jg.addWidget(b,1,col)
         jg.addWidget(QtWidgets.QLabel("degree"),1,7)
 
-        self.dec_manual_invert = QtWidgets.QCheckBox("Invert DEC")
-        self.dec_manual_invert.setChecked(bool(self.cfg.get("dec_manual_invert", False)))
         jg.addWidget(QtWidgets.QLabel("DEC"),2,0)
         for col, deg in enumerate((15, 5, 1), start=1):
             b = QtWidgets.QPushButton(f"↑ +{deg}°")
@@ -1704,7 +1709,6 @@ class OATHelper(QtWidgets.QMainWindow):
             b = QtWidgets.QPushButton(f"↓ -{deg}°")
             b.clicked.connect(lambda _=False, x=deg: self.dec_manual_jog_move(-x))
             jg.addWidget(b,2,col)
-        jg.addWidget(self.dec_manual_invert,2,7)
         v.addWidget(adjust)
 
         # --- 3. Final Home --------------------------------------------------
@@ -1729,21 +1733,17 @@ class OATHelper(QtWidgets.QMainWindow):
             "Use this only right after power-on, when DEC is at the same physical position as last time (parked, for example).")
         self.dec_restore_btn.clicked.connect(self.restore_saved_dec_home)
         fg.addWidget(self.dec_restore_btn,1,0,1,2)
-        dec_park_btn = QtWidgets.QPushButton("Move DEC to power-off position")
-        dec_park_btn.setToolTip(_("Reverses the stored 'power-on -> Home' travel to return to the next session's starting position."))
-        dec_park_btn.clicked.connect(self.dec_park_for_power_off)
         park_btn = QtWidgets.QPushButton("PARK")
         park_btn.setToolTip(_("Firmware Park (:hP#) - move to Home, park and stop tracking."))
         park_btn.clicked.connect(self.park_mount)
         unpark_btn = QtWidgets.QPushButton("UNPARK")
         unpark_btn.setToolTip(_("Firmware Unpark (:hU#) - resume tracking."))
         unpark_btn.clicked.connect(self.unpark_mount)
-        fg.addWidget(self._mark_advanced(dec_park_btn),1,2)
-        fg.addWidget(self._mark_advanced(park_btn),1,3)
+        fg.addWidget(self._mark_advanced(park_btn),1,2,1,2)
         opt_box = QtWidgets.QWidget()
         opt = QtWidgets.QHBoxLayout(opt_box)
         opt.setContentsMargins(0,0,0,0)
-        self.dec_offset_eeprom = QtWidgets.QCheckBox("Store the DEC Home offset on the mount EEPROM (OATControl compatible)")
+        self.dec_offset_eeprom = QtWidgets.QCheckBox("Store the DEC Home offset on the mount EEPROM")
         self.dec_offset_eeprom.setChecked(self.cfg.get("dec_home_offset_mode") == "eeprom")
         self.dec_offset_eeprom.setToolTip(
             "When enabled, SET HOME stores the 'power-on -> Home' travel on the mount with :XSHD# (kept even if the tool is reinstalled).\n"
@@ -1832,6 +1832,54 @@ class OATHelper(QtWidgets.QMainWindow):
         v.addStretch(1)
         return w
 
+
+    class _DmsValue:
+        """Degrees/minutes/seconds entry that reports a single arcminute value."""
+
+        def __init__(self, sign, degrees, minutes, seconds, preview, limit):
+            self._sign, self._deg, self._min, self._sec = sign, degrees, minutes, seconds
+            self._preview, self._limit = preview, limit
+            for widget in (sign, degrees, minutes, seconds):
+                signal = widget.currentIndexChanged if hasattr(widget, "currentIndexChanged") else widget.valueChanged
+                signal.connect(self.refresh)
+            self.refresh()
+
+        def value(self):
+            arcmin = self._deg.value() * 60.0 + self._min.value() + self._sec.value() / 60.0
+            if self._sign.currentText().startswith("-"):
+                arcmin = -arcmin
+            return max(-self._limit, min(self._limit, arcmin))
+
+        def set_arcmin(self, arcmin):
+            total = abs(arcmin)
+            self._sign.setCurrentIndex(1 if arcmin < 0 else 0)
+            self._deg.setValue(int(total // 60))
+            rest = total - int(total // 60) * 60
+            self._min.setValue(int(rest))
+            self._sec.setValue(round((rest - int(rest)) * 60, 1))
+
+        def refresh(self):
+            arcmin = self.value()
+            text = f"= {arcmin:+.2f}′"
+            raw = self._deg.value() * 60.0 + self._min.value() + self._sec.value() / 60.0
+            if raw > self._limit:
+                text += _(" (clamped to the {limit:.0f}′ travel limit)").format(limit=self._limit)
+            self._preview.setText(text)
+
+    def _make_dms_row(self, grid, row, label, limit):
+        """Build a °/'/\" entry on one grid row and return its value holder."""
+        sign = QtWidgets.QComboBox(); sign.addItems(["+", "-"]); sign.setMaximumWidth(50)
+        degrees = QtWidgets.QSpinBox(); degrees.setRange(0, 20); degrees.setSuffix("°"); degrees.setMaximumWidth(70)
+        minutes = QtWidgets.QSpinBox(); minutes.setRange(0, 59); minutes.setSuffix("′"); minutes.setMaximumWidth(70)
+        seconds = QtWidgets.QDoubleSpinBox(); seconds.setRange(0, 59.9); seconds.setDecimals(1)
+        seconds.setSuffix("″"); seconds.setMaximumWidth(80)
+        preview = QtWidgets.QLabel(); preview.setStyleSheet("color:palette(dark)")
+        grid.addWidget(QtWidgets.QLabel(label), row, 0)
+        grid.addWidget(sign, row, 1); grid.addWidget(degrees, row, 2)
+        grid.addWidget(minutes, row, 3); grid.addWidget(seconds, row, 4)
+        grid.addWidget(preview, row, 5, 1, 2)
+        return self._DmsValue(sign, degrees, minutes, seconds, preview, limit)
+
     def make_pa_tab(self):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
         auto = QtWidgets.QGroupBox("Ekos PAA automatic correction")
@@ -1840,10 +1888,8 @@ class OATHelper(QtWidgets.QMainWindow):
         self.alt_offset = QtWidgets.QDoubleSpinBox(); self.alt_offset.setRange(-120,120); self.alt_offset.setDecimals(3); self.alt_offset.setSuffix("′"); self.alt_offset.setValue(float(self.cfg["alt_offset_arcmin"]))
         self.az_offset = QtWidgets.QDoubleSpinBox(); self.az_offset.setRange(-120,120); self.az_offset.setDecimals(3); self.az_offset.setSuffix("′"); self.az_offset.setValue(float(self.cfg["az_offset_arcmin"]))
         self.max_move = QtWidgets.QDoubleSpinBox(); self.max_move.setRange(0.5, 140); self.max_move.setDecimals(1); self.max_move.setSuffix("′/axis"); self.max_move.setValue(float(self.cfg["max_move_arcmin"]))
-        self.invert_alt = QtWidgets.QCheckBox("Invert ALT correction"); self.invert_alt.setChecked(bool(self.cfg["invert_alt"]))
-        self.invert_az = QtWidgets.QCheckBox("Invert AZ correction"); self.invert_az.setChecked(bool(self.cfg["invert_az"]))
         self.wait_two = QtWidgets.QCheckBox("Wait for two measurements before the first correction")
-        self.wait_two.setToolTip(_("Like OATControl, correct from the second consecutive PAA solution (avoids first-solve noise)."))
+        self.wait_two.setToolTip(_("Correct from the second consecutive PAA solution; the first solve after a slew is the noisiest."))
         self.wait_two.setChecked(bool(self.cfg.get("autopa_wait_two_solutions", True)))
         self.wait_two.toggled.connect(lambda on: self.cfg.__setitem__("autopa_wait_two_solutions", bool(on)))
         self.pa_start = QtWidgets.QPushButton("Start auto correction"); self.pa_start.setObjectName("primary")
@@ -1854,7 +1900,7 @@ class OATHelper(QtWidgets.QMainWindow):
         g.addWidget(QtWidgets.QLabel("ALT correction offset"),0,2); g.addWidget(self.alt_offset,0,3)
         g.addWidget(QtWidgets.QLabel("AZ correction offset"),1,0); g.addWidget(self.az_offset,1,1)
         g.addWidget(QtWidgets.QLabel("Max automatic move per cycle"),1,2); g.addWidget(self.max_move,1,3)
-        g.addWidget(self.invert_alt,2,0); g.addWidget(self.invert_az,2,1); g.addWidget(self.wait_two,2,2,1,2)
+        g.addWidget(self.wait_two,2,0,1,4)
         pa_diag = QtWidgets.QPushButton("Diagnose PAA log")
         pa_diag.setToolTip(_("Prints the Ekos log paths/settings and the most recent PAA Refresh values to the log."))
         pa_diag.clicked.connect(self.diagnose_paa_log)
@@ -1865,17 +1911,20 @@ class OATHelper(QtWidgets.QMainWindow):
 
         manual = QtWidgets.QGroupBox("AutoPA manual control (reuses the existing INDI POLAR_ALT / POLAR_AZ)")
         mg = QtWidgets.QGridLayout(manual)
-        self.alt_move = QtWidgets.QDoubleSpinBox(); self.alt_move.setRange(-140,140); self.alt_move.setDecimals(3); self.alt_move.setSuffix("′")
-        self.az_move = QtWidgets.QDoubleSpinBox(); self.az_move.setRange(-320,320); self.az_move.setDecimals(3); self.az_move.setSuffix("′")
-        move_alt = QtWidgets.QPushButton("Move ALT"); move_az = QtWidgets.QPushButton("Move AZ"); move_both = QtWidgets.QPushButton("Move ALT -> AZ")
+        # Ekos states the polar error in degrees/minutes/seconds, so take the
+        # same units here instead of making people convert 1°52'00" to 112'.
+        self.alt_move = self._make_dms_row(mg, 0, "ALT", limit=140)
+        self.az_move = self._make_dms_row(mg, 1, "AZ", limit=320)
+        move_alt = QtWidgets.QPushButton("Move ALT"); move_az = QtWidgets.QPushButton("Move AZ")
+        move_both = QtWidgets.QPushButton("Move ALT -> AZ")
         self.pa_motion_buttons.extend([move_alt, move_az, move_both])
-        move_alt.clicked.connect(lambda: self.move_pa(self.alt_move.value(), None)); move_az.clicked.connect(lambda: self.move_pa(None, self.az_move.value()))
+        move_alt.clicked.connect(lambda: self.move_pa(self.alt_move.value(), None))
+        move_az.clicked.connect(lambda: self.move_pa(None, self.az_move.value()))
         move_both.clicked.connect(lambda: self.move_pa(self.alt_move.value(), self.az_move.value()))
-        mg.addWidget(QtWidgets.QLabel("ALT"),0,0); mg.addWidget(self.alt_move,0,1); mg.addWidget(move_alt,0,2)
-        mg.addWidget(QtWidgets.QLabel("AZ"),1,0); mg.addWidget(self.az_move,1,1); mg.addWidget(move_az,1,2); mg.addWidget(move_both,0,3,2,1)
+        mg.addWidget(move_alt,0,7); mg.addWidget(move_az,1,7); mg.addWidget(move_both,0,8,2,1)
         for row,(axis,label) in enumerate((("ALT","ALT quick"),("AZ","AZ quick")), start=2):
             mg.addWidget(QtWidgets.QLabel(label),row,0)
-            for col,n in enumerate((-5,-1,-0.5,0.5,1,5), start=1):
+            for col,n in enumerate((-30,-5,-1,-0.5,0.5,1,5,30), start=1):
                 b=QtWidgets.QPushButton(f"{n:+g}′")
                 self.pa_motion_buttons.append(b)
                 b.clicked.connect(lambda _=False, a=axis, x=n: self.move_pa(x if a=="ALT" else None, x if a=="AZ" else None))
@@ -2133,7 +2182,7 @@ class OATHelper(QtWidgets.QMainWindow):
     # ------------------------ safety / mini controller ------------------------
     @staticmethod
     def _parse_firmware_version(text):
-        """'V1.13.9' -> 11309, matching OATControl's numeric gating."""
+        """'V1.13.9' -> 11309, so builds can be compared numerically."""
         m = re.search(r"(\d+)\.(\d+)\.(\d+)", str(text))
         if not m:
             return 0
@@ -2176,7 +2225,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 widget.setToolTip(reason)
 
     def run_on_connect_actions(self):
-        """Optional automation right after a connect (OATControl parity)."""
+        """Optional automation right after a connect."""
         if not self.indi.running or self._motion_or_home_busy():
             return
         if self.cfg.get("restore_dec_home_on_connect") and self.cfg.get("dec_home_offset_steps") is not None:
@@ -2239,7 +2288,7 @@ class OATHelper(QtWidgets.QMainWindow):
         down = float(self.dec_limit_travel_down.value())
         up = float(self.dec_limit_travel_up.value())
         if QtWidgets.QMessageBox.question(
-                self, "Set DEC limit",
+                self, _("Set DEC limit"),
                 _("Allow the DEC ring to travel {down:.1f}° down and {up:.1f}° up from Home?\n"
                   "With Home at the pole that is DEC {low:+.1f}° … {high:+.1f}°; every move is clamped to it.").format(
                     down=down, up=up, low=90.0 - down, high=min(90.0, 90.0 + up)),
@@ -2301,8 +2350,7 @@ class OATHelper(QtWidgets.QMainWindow):
     def check_target_reachable(self):
         """Ask the firmware where a target would put the steppers (:XGC#).
 
-        OATControl uses this to pre-compute every point of interest.  On an OAT
-        the travel is short, so knowing before the slew whether a target lands
+        On an OAT the travel is short, so knowing before the slew whether a target lands
         outside the DEC limits or beyond the RA safety hours is worth more than
         the slew itself.
         """
@@ -2360,7 +2408,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self.log(f"Loaded the current Ekos coordinates as the target: RA {pos[0]:.4f}h DEC {pos[1]:+.3f}°")
 
     def park_mount(self):
-        """Firmware Park (:hP#) with the guards OATControl applies."""
+        """Firmware Park (:hP#), guarded."""
         if not self.indi.running:
             self.log("An INDI connection is required.", logging.WARNING); return
         if self._motion_or_home_busy() or self.park_busy:
@@ -2404,42 +2452,6 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log("An INDI connection is required.", logging.WARNING); return
         self.meade_async("&hU#", lambda r: self.log(f"✓ Unpark - tracking started (reply={r})"))
 
-    def dec_park_for_power_off(self):
-        """Move DEC back to the stored power-on position before switching off.
-
-        Mirrors OATControl's 'Goto DEC Park before Power Off': the reverse of
-        the stored power-on -> Home delta, so the next session starts from a
-        known DEC position.
-        """
-        if not self.indi.running:
-            self.log("An INDI connection is required.", logging.WARNING); return
-        if self._motion_or_home_busy():
-            self.log("Wait for the current move to finish.", logging.WARNING); return
-        offset = self._stored_dec_home_offset()
-        if offset is None:
-            self.log("No saved DEC Home record. Run SET HOME first.", logging.WARNING); return
-        if QtWidgets.QMessageBox.question(
-                self, _("Move DEC to power-off position"),
-                f"Returns DEC to the saved power-on position ({-int(offset):+d} step).\n"
-                "Run this while DEC is at Home(0). Continue?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
-            return
-        self.dec_home_move_busy = True
-        def job():
-            stored = self._stored_dec_home_offset(allow_mount=True)
-            delta = int(stored if stored is not None else offset)
-            gx = self._wait_for_dec_idle(timeout=10.0)
-            if int(gx["dec_steps"]) != 0:
-                raise RuntimeError(f"DEC is not at Home(0) (GX DEC={gx['dec_steps']}). Run GO TO HOME first.")
-            self.indi.meade(f"@MXd{-delta}#")
-            end = self._wait_for_dec_idle(timeout=120.0)
-            return int(end["dec_steps"])
-        def done(final):
-            self.log(f"✓ DEC moved to the power-off position (GX DEC={final:+d}). You can power off now.")
-        self.run_async(job, done, lambda e: self.log(f"DEC Park failed: {e}", logging.ERROR),
-                       lambda: setattr(self, "dec_home_move_busy", False))
-
     def save_release_position_here(self):
         """Store the current position as the shutdown (release) position."""
         if not self.indi.running:
@@ -2449,8 +2461,6 @@ class OATHelper(QtWidgets.QMainWindow):
             ra_spd = self._read_ra_steps_per_degree()
             dec_spd = self._read_dec_steps_per_degree()
             dec_deg = int(gx["dec_steps"]) / dec_spd
-            if self.dec_manual_invert.isChecked():
-                dec_deg = -dec_deg
             return int(gx["ra_steps"]) / ra_spd, dec_deg
         def done(values):
             ra_deg, dec_deg = values
@@ -2530,8 +2540,6 @@ class OATHelper(QtWidgets.QMainWindow):
 
             dec_spd = self._read_dec_steps_per_degree()
             dec_steps = self._dec_steps_for_degrees(dec_deg, dec_spd)
-            if self.dec_manual_invert.isChecked():
-                dec_steps = -dec_steps
             moved_dec = 0
             if dec_steps:
                 self.indi.meade(f"@MXd{dec_steps}#")
@@ -2592,7 +2600,7 @@ class OATHelper(QtWidgets.QMainWindow):
             try:
                 raw = int(float(str(self.indi.meade(":XGHD#")).strip().rstrip("#")))
                 if raw:
-                    return -raw   # firmware stores the negated delta (OATControl convention)
+                    return -raw   # the firmware stores the negated delta
             except Exception as exc:
                 self.logger.debug("XGHD read failed: %s", exc)
         value = self.cfg.get("dec_home_offset_steps")
@@ -2676,7 +2684,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if not value or axis not in ("RA", "DEC"):
             self.log("No calculated result to apply. Complete measurements (1) to (3) first.", logging.WARNING); return
         if value <= 0:
-            QtWidgets.QMessageBox.warning(self, "steps/degree", _(
+            QtWidgets.QMessageBox.warning(self, _("steps/degree"), _(
                 "The measurement produced {value:.4f} steps/degree, which cannot be right. "
                 "A negative or zero value usually means the axis moved the other way during the test. "
                 "Check the direction, repeat the measurement, and do not apply this value.").format(value=value))
@@ -2689,7 +2697,7 @@ class OATHelper(QtWidgets.QMainWindow):
         def confirm(before):
             ratio = value / before if before else 0.0
             if before and abs(ratio - 1.0) > 0.20:
-                answer = QtWidgets.QMessageBox.warning(self, "steps/degree", _(
+                answer = QtWidgets.QMessageBox.warning(self, _("steps/degree"), _(
                     "The measured {axis} value {value:.4f} differs from the one in the mount "
                     "({before:.4f}) by {percent:.0f}%.\n\n"
                     "A correct calibration is normally within a few percent. A jump this large usually means "
@@ -3036,7 +3044,6 @@ class OATHelper(QtWidgets.QMainWindow):
         dec_direction = int(dec_direction)
         ra_degrees = float(self.mini_ra_degrees.currentData()) * ra_direction if ra_direction else 0.0
         dec_degrees = float(self.mini_dec_degrees.currentData()) * dec_direction if dec_direction else 0.0
-        invert = bool(self.dec_manual_invert.isChecked())
 
         self.mini_motion_busy = True
         if dec_direction:
@@ -3057,7 +3064,7 @@ class OATHelper(QtWidgets.QMainWindow):
             if dec_direction:
                 dec_spd = self._read_dec_steps_per_degree()
                 user_steps = self._dec_steps_for_degrees(dec_degrees, dec_spd)
-                dec_motor_steps = -user_steps if invert else user_steps
+                dec_motor_steps = user_steps
                 if dec_motor_steps == 0:
                     raise RuntimeError(
                         f"DEC {dec_degrees:+g}° converts to 0 step (XGD={dec_spd})")
@@ -3084,11 +3091,11 @@ class OATHelper(QtWidgets.QMainWindow):
             self.logger.debug(
                 "Mini pad move: RA=%+.3f deg/%+d motor step XGR=%s, "
                 "DEC=%+.3f deg/%+d motor step XGD=%s, "
-                "GX RA %+d->%+d DEC %+d->%+d invert=%s",
+                "GX RA %+d->%+d DEC %+d->%+d",
                 rd, rs, f"{rspd:.9f}" if rspd is not None else "-",
                 dd, ds, f"{dspd:.9f}" if dspd is not None else "-",
                 gx_start["ra_steps"], gx_end["ra_steps"],
-                gx_start["dec_steps"], gx_end["dec_steps"], invert)
+                gx_start["dec_steps"], gx_end["dec_steps"])
 
         def err(message):
             self.log(f"Mini Controller move failed: {message}", logging.ERROR)
@@ -3151,8 +3158,7 @@ class OATHelper(QtWidgets.QMainWindow):
     def keyPressEvent(self, event):
         """Keyboard slewing while the Mini Controller tab is in front.
 
-        OATControl's mini control uses the arrow keys for RA/DEC and WASD for
-        ALT/AZ; the same muscle memory works here.
+        Arrow keys drive RA/DEC and WASD drives ALT/AZ.
         """
         handled = False
         if hasattr(self, "tabs") and self.tabs.currentWidget() is getattr(self, "mini_tab", None):
@@ -3406,7 +3412,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self._set_status_dot(self.conn_status, bool(connected), "INDI")
         if not connected and hasattr(self, "mount_status"):
             self._set_status_dot(self.mount_status, None, "Mount")
-        self.connect_btn.setText(_("Disconnect") if connected else "Connect")
+        self.connect_btn.setText(_("Disconnect") if connected else _("Connect"))
         self.log(msg)
         self.update_wizard_status()
         if connected:
@@ -3541,7 +3547,7 @@ class OATHelper(QtWidgets.QMainWindow):
             # correction.  Keep that implementation detail out of the UI.
             ra_user = -vals[0]
             dec_native_user = -vals[1]
-            dec_user = -dec_native_user if self.dec_manual_invert.isChecked() else dec_native_user
+            dec_user = dec_native_user
             self.ra_offset.setValue(ra_user); self.dec_offset.setValue(dec_user)
             self.log(f"RA Home Correction read: {ra_user:+d} step")
             self.logger.debug("Firmware raw Home offsets: RA=%+d DEC=%+d (DEC hidden in normal UI)", vals[0], vals[1])
@@ -3577,14 +3583,14 @@ class OATHelper(QtWidgets.QMainWindow):
         # V1.13.9 stores the opposite sign because final = Hall_midpoint-offset.
         user_val = self.ra_offset.value() if axis == "RA" else self.dec_offset.value()
         native_user = int(user_val)
-        if axis == "DEC" and self.dec_manual_invert.isChecked():
+        if False:  # DEC display needs no flip: the firmware direction is authoritative
             native_user = -native_user
         firmware_val = -native_user
         def job():
             return self._write_offset_verified(axis, firmware_val)
         def done(readback):
             native_shown = -int(readback)
-            shown = -native_shown if axis == "DEC" and self.dec_manual_invert.isChecked() else native_shown
+            shown = native_shown
             if axis == "RA": self.ra_offset.setValue(shown)
             else: self.dec_offset.setValue(shown)
             self.log(f"✓ {axis} Home Correction saved and verified: {shown:+d} step")
@@ -3694,7 +3700,6 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log("A DEC move is being processed. Press again once it finishes.", logging.WARNING); return
 
         user_degrees = float(user_degrees)
-        invert = bool(self.dec_manual_invert.isChecked())
         self.dec_jog_busy = True
 
         def job():
@@ -3702,7 +3707,7 @@ class OATHelper(QtWidgets.QMainWindow):
             # EEPROM-calibrated XGD value authoritative without restarting Tools.
             spd = self._read_dec_steps_per_degree()
             user_steps = self._dec_steps_for_degrees(user_degrees, spd)
-            motor_steps = -user_steps if invert else user_steps
+            motor_steps = user_steps
             if motor_steps == 0:
                 raise RuntimeError(f"DEC {user_degrees:+g}° converts to 0 step (XGD={spd})")
             gx_start = self._parse_gx(self.indi.meade(":GX#"))
@@ -3727,8 +3732,8 @@ class OATHelper(QtWidgets.QMainWindow):
                     "Adjusting - press 'SET HOME' once DEC is at its real Home position.")
             self.log(f"{source}: DEC {'↑' if user_degrees>0 else '↓'} {abs(user_degrees):g}° move sent")
             self.logger.debug(
-                "%s DEC jog: user=%+.3f deg, XGD=%.9f step/deg, motor=%+d step, GX %+d -> %+d, invert=%s",
-                source, user_degrees, spd, motor_steps, start_pos, final_pos, invert)
+                "%s DEC jog: user=%+.3f deg, XGD=%.9f step/deg, motor=%+d step, GX %+d -> %+d",
+                source, user_degrees, spd, motor_steps, start_pos, final_pos)
 
         def err(message):
             self.log(f"DEC jog failed: {message}", logging.ERROR)
@@ -3890,7 +3895,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if drift is not None and drift[0] > 5.0:
             minutes, mount_lst, computed = drift
             answer = QtWidgets.QMessageBox.warning(
-                self, "SET HOME", _(
+                self, _("SET HOME"), _(
                     "The mount's sidereal time is {minutes:.0f} min away from the time computed for your site "
                     "(mount {mount}, expected {expected}).\n\n"
                     "SET HOME stores that value as the RA reference, so a GOTO may flip across the meridian and "
@@ -3925,8 +3930,8 @@ class OATHelper(QtWidgets.QMainWindow):
                 pass
             gx_before, reply, gx_after = self._firmware_set_home()
             if eeprom_mode and self.dec_odometer_valid:
-                # OATControl convention: store the negated power-on -> Home
-                # delta, so :MXd{-offset} drives to Home and :MXd{offset} back.
+                # Store the negated power-on -> Home delta, so :MXd{-offset}
+                # drives to Home and :MXd{offset} back.
                 delta = int(gx_before["dec_steps"]) + int(self.dec_zero_shift)
                 if delta:
                     self._write_offset_verified("DEC", -delta)
@@ -4580,7 +4585,8 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log("AutoPA is moving; Zero-save request ignored.", logging.WARNING)
             return
         ans = QtWidgets.QMessageBox.warning(self, _("Save AutoPA Zero"),
-            "This sets the current AZ/ALT position to zero and saves it to persistent storage.\nUse it only when redefining the physical reference point. Continue?",
+            _("This sets the current AZ/ALT position to zero and saves it to persistent storage.\n"
+              "Use it only when redefining the physical reference point. Continue?"),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
         if ans != QtWidgets.QMessageBox.Yes: return
         self.meade_async("&hZ#", lambda r: (self.log(f"AutoPA zero saved, reply={r}"), self.read_pa_position()))
@@ -4928,13 +4934,27 @@ class OATHelper(QtWidgets.QMainWindow):
             previous_signature = self.autopa_last_signature
             self.autopa_last_signature = signature
             if self.wait_two.isChecked() and not getattr(self, "autopa_seen_solution", False):
-                # OATControl waits for a second error calculation before it
-                # moves anything; the first solve after a slew is the noisiest.
+                # Wait for a second error calculation before moving anything;
+                # the first solve after a slew is the noisiest.
                 self.autopa_seen_solution = True
                 self.pa_status.setText(_("Waiting for two measurements (1/2)"))
                 self.log("The first PAA solution is used as a reference only. Correction starts from the next Refresh.")
                 self.autopa_busy = False
                 return
+            # An Ekos capture+solve takes ~25 s, so the refresh line that
+            # appears right after a correction was usually measured *before*
+            # it. Acting on it applies the same correction twice: the axis
+            # overshoots to the mirror image of the error, the next cycle
+            # corrects back, and the run oscillates forever while the
+            # "residual increased" guard blames the motor direction.
+            finished = getattr(self, "autopa_adjustment_finished", None)
+            if finished is not None and ts <= finished + timedelta(seconds=1):
+                self.pa_status.setText(_("Waiting for a measurement taken after the correction"))
+                self.log(f"Ignoring a PAA solution measured at {ts.strftime('%H:%M:%S')}, before the last "
+                         f"correction finished at {finished.strftime('%H:%M:%S')}. Waiting for the next Refresh.")
+                self.autopa_busy = False
+                return
+
             self.autopa_last_entry = ts
             self.log(f"New PAA Refresh accepted: {Path(fp).name} @ {ts.strftime('%H:%M:%S.%f')[:-3]}")
             self.logger.debug("PAA source line: %s", line)
@@ -4950,8 +4970,6 @@ class OATHelper(QtWidgets.QMainWindow):
 
             alt_move = -residual_alt
             az_move = +residual_az
-            if self.invert_alt.isChecked(): alt_move *= -1
-            if self.invert_az.isChecked(): az_move *= -1
 
             self.log(
                 f"PAA solution: az={az_deg:.6f}° ({raw_az:+.3f}′), "
@@ -4966,16 +4984,16 @@ class OATHelper(QtWidgets.QMainWindow):
             if pending:
                 prev_alt, prev_az, moved_alt, moved_az = pending
                 self.paa_pending_move = None
-                for name, before, after, moved, box in (
-                        ("ALT", prev_alt, residual_alt, moved_alt, self.invert_alt),
-                        ("AZ", prev_az, residual_az, moved_az, self.invert_az)):
+                for name, before, after, moved in (
+                        ("ALT", prev_alt, residual_alt, moved_alt),
+                        ("AZ", prev_az, residual_az, moved_az)):
                     if abs(moved) < 0.05:
                         continue
                     if abs(after) > abs(before) + max(0.2, abs(before) * 0.1):
                         self.log(
-                            f"{name} error {abs(before):.2f}′ → {abs(after):.2f}' arcmin. "
-                            f"'{box.text()}' and try again (the motor direction is most likely reversed).",
-                            logging.WARNING)
+                            f"{name} error grew from {abs(before):.2f}′ to {abs(after):.2f}′ after a "
+                            f"{moved:+.2f}′ move, so that axis most likely runs backwards. Set "
+                            f"{name}_INVERT_DIR in Configuration_local.hpp and reflash.", logging.WARNING)
 
             # Direction / runaway guard: stop after two consecutive meaningful
             # increases.  Ignore small solver noise (>=0.25' or 10%).
@@ -5008,8 +5026,15 @@ class OATHelper(QtWidgets.QMainWindow):
             lim=self.max_move.value()
             if abs(alt_move)>lim or abs(az_move)>lim:
                 self.pa_status.setText(_("Safety limit exceeded"))
-                self.log(f"Automatic move blocked: correction exceeds {lim:.1f}′ per-axis safety limit.", logging.ERROR)
-                self.stop_autopa_watch(); return
+                # Refusing outright made the first correction impossible - the
+                # initial error is legitimately large - and pushed people to
+                # raise the limit until it no longer protected anything. Move
+                # by the limit instead and let the next cycle continue.
+                alt_move = max(-lim, min(lim, alt_move))
+                az_move = max(-lim, min(lim, az_move))
+                self.log(f"Correction larger than the {lim:.1f}′ per-axis limit; moving "
+                         f"ALT {alt_move:+.1f}′ / AZ {az_move:+.1f}′ this cycle and continuing.",
+                         logging.WARNING)
 
             if self.move_pa(alt_move,az_move,source="auto"):
                 self.pa_status.setText(f"Correcting ALT {alt_move:+.2f}′ → AZ {az_move:+.2f}′")
@@ -5227,7 +5252,7 @@ class OATHelper(QtWidgets.QMainWindow):
         fn,_=QtWidgets.QFileDialog.getOpenFileName(self,"Select Configuration_local.hpp",str(Path.home()),"Header (*.hpp *.h);;All files (*)")
         if fn:
             try: self._load_configuration_file(fn); self._sync_configuration_to_source()
-            except Exception as exc: QtWidgets.QMessageBox.warning(self,"Configuration",str(exc))
+            except Exception as exc: QtWidgets.QMessageBox.warning(self,_("Configuration"),str(exc))
 
     def edit_configuration_file(self):
         text=FIRMWARE_CONFIG.read_text(encoding="utf-8",errors="replace") if FIRMWARE_CONFIG.exists() else "// Configuration_local.hpp\n// Importing your existing OAT configuration file and editing only the needed #defines is recommended.\n"
@@ -5282,7 +5307,7 @@ class OATHelper(QtWidgets.QMainWindow):
 
     def send_custom_command(self):
         try: cmd=self._normalize_command(self.command_edit.text())
-        except Exception as exc: QtWidgets.QMessageBox.warning(self,"Command",str(exc)); return
+        except Exception as exc: QtWidgets.QMessageBox.warning(self,_("Command"),str(exc)); return
         self.save_config(); self.diag_text.appendPlainText(f"{datetime.now():%H:%M:%S} TX {cmd}")
         self.run_async(lambda:self.indi.meade(cmd,timeout=10),lambda r:self.diag_text.appendPlainText(f"{datetime.now():%H:%M:%S} RX {r or '<no payload>'}"),lambda e:self.diag_text.appendPlainText(f"ERROR {e}"))
 
@@ -5505,8 +5530,7 @@ class OATHelper(QtWidgets.QMainWindow):
     def check_latest_release(self):
         """Compare the local source with the newest GitHub release tag.
 
-        OATControl polls the same endpoint to badge available firmware updates;
-        the call is best-effort and never blocks build/flash.
+        Best-effort: the call never blocks build/flash.
         """
         def job():
             url="https://api.github.com/repos/OpenAstroTech/OpenAstroTracker-Firmware/releases/latest"
@@ -5664,7 +5688,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if not self._is_git_repo(src):
             self._fw_log("Not a git repository, so it cannot be restored. Use 'Check for updates' to fetch a git source."); return
         if QtWidgets.QMessageBox.warning(
-                self,"Restore source",
+                self,_("Restore source"),
                 "This discards all local changes in the firmware source and returns it to the current version.\n"
                 "(Configuration_local.hpp is stored separately in the OAT Firmware settings folder and is preserved.)\nContinue?",
                 QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)!=QtWidgets.QMessageBox.Yes:
@@ -5781,11 +5805,11 @@ class OATHelper(QtWidgets.QMainWindow):
     def _flash_precheck(self):
         """Make sure nothing else holds the serial port, offering to free it."""
         if not self.indi.running:
-            QtWidgets.QMessageBox.warning(self, "Flash blocked", _(
+            QtWidgets.QMessageBox.warning(self, _("Flash blocked"), _(
                 "For safety, connect to the INDI server first and confirm that the mount is Disconnected."))
             return False
         if self.indi.mount_is_connected() is not False:
-            answer = QtWidgets.QMessageBox.question(self, "Firmware Flash", _(
+            answer = QtWidgets.QMessageBox.question(self, _("Firmware Flash"), _(
                 "The mount is connected, so the INDI driver holds the serial port and the upload would fail.\n\n"
                 "Disconnect the mount now and continue?\n"
                 "Ekos will show it as disconnected; it is reconnected automatically after a successful upload."),
@@ -5794,7 +5818,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 return False
             if not self._disconnect_mount_for_flash():
                 return False
-        return QtWidgets.QMessageBox.question(self, "Firmware Flash", _(
+        return QtWidgets.QMessageBox.question(self, _("Firmware Flash"), _(
             "This flashes the current local firmware source with the saved Configuration_local.hpp. "
             "If you have an auto-reset suppression capacitor/jumper, have you disabled it?")) == QtWidgets.QMessageBox.Yes
 
@@ -5807,7 +5831,7 @@ class OATHelper(QtWidgets.QMainWindow):
         try:
             self.indi.set_device_connected(False)
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Flash blocked",
+            QtWidgets.QMessageBox.warning(self, _("Flash blocked"),
                                           _("Could not disconnect the mount: {error}").format(error=exc))
             self.reconnect_after_flash = False
             return False
@@ -5820,7 +5844,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 self.fw_progress_label.setText(_("Mount disconnected"))
                 return True
             time.sleep(0.2)
-        QtWidgets.QMessageBox.warning(self, "Flash blocked", _(
+        QtWidgets.QMessageBox.warning(self, _("Flash blocked"), _(
             "The mount did not report Disconnected within 12 s. Disconnect it in Ekos and try again."))
         self.reconnect_after_flash = False
         return False
@@ -5878,9 +5902,9 @@ class OATHelper(QtWidgets.QMainWindow):
 
     def factory_reset(self):
         try:cmd=self._normalize_command(self.factory_cmd.text())
-        except Exception as e:QtWidgets.QMessageBox.warning(self,"Factory Reset",str(e));return
-        if self.factory_confirm.text().strip()!="RESET":QtWidgets.QMessageBox.warning(self,"Factory Reset","Type RESET exactly in the Confirm field.");return
-        if QtWidgets.QMessageBox.warning(self,"FACTORY RESET","EEPROM calibration, home offsets and runtime settings may be erased. Continue?",QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)!=QtWidgets.QMessageBox.Yes:return
+        except Exception as e:QtWidgets.QMessageBox.warning(self,_("Factory Reset"),str(e));return
+        if self.factory_confirm.text().strip()!="RESET":QtWidgets.QMessageBox.warning(self,_("Factory Reset"),"Type RESET exactly in the Confirm field.");return
+        if QtWidgets.QMessageBox.warning(self,_("FACTORY RESET"),"EEPROM calibration, home offsets and runtime settings may be erased. Continue?",QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)!=QtWidgets.QMessageBox.Yes:return
         def job(): return self._snapshot_before_reset(),self.indi.meade(cmd,timeout=10)
         def done(x):self._fw_log(f"Pre-reset snapshot: {x[0]}\nFactory reset command sent. Response: {x[1] or '<no payload>'}\nPower-cycle/reconnect and verify Home/calibration.");self.factory_confirm.clear()
         self.run_async(job,done,lambda e:self._fw_log(e))

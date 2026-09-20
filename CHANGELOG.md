@@ -1,5 +1,76 @@
 # Changelog
 
+## 0.6.1
+
+- **Translation gaps closed.** Text built at runtime never went through the
+  widget-tree pass, so the ⚙ Settings, Log and Advanced toggles fell back to
+  English as soon as they were clicked, and the checklist editor opened with the
+  English defaults instead of what was on screen. Those now translate, the
+  editor starts from the visible items, and 30 further labels, group titles and
+  tooltips (Build environment, Expected motor profile, Meade command, Tracking,
+  Custom buttons, the axis-calibration labels ...) gained Korean text.
+- `tests/test_i18n_coverage.py` walks every widget with the UI in Korean and
+  fails on anything still in English, so a new string cannot slip through
+  untranslated again.
+
+## 0.6.0
+
+- **Direction overrides removed.** "Invert DEC", "Invert ALT correction" and
+  "Invert AZ correction" are gone. Motor direction belongs to the firmware
+  (`DEC_INVERT_DIR`, `ALT_INVERT_DIR`, `AZ_INVERT_DIR` in
+  Configuration_local.hpp) and is set once when the mount is built, so a
+  tool-side flip only hid a misconfiguration - and the DEC one never applied to
+  GOTO, Park or Go To Home anyway. When a correction makes an error grow, the
+  log now names the firmware setting to change instead of a checkbox.
+- Wording no longer describes features as matching or being compatible with
+  another tool; the legacy Korean patch notes under `docs/` were superseded by
+  this changelog and removed.
+
+## 0.5.9
+
+- **The direction overrides moved off the session pages.** "Invert DEC",
+  "Invert ALT correction" and "Invert AZ correction" now sit together on the
+  Axis cal page under "Motor direction (check once, then leave alone)", since
+  nobody flips them mid-session. The DEC one is labelled "Invert DEC jog
+  buttons" because that is all it does - GOTO, Park and Go To Home use the
+  firmware direction - and each tooltip names the real setting
+  (DEC_INVERT_DIR / ALT_INVERT_DIR / AZ_INVERT_DIR in Configuration_local.hpp).
+
+## 0.5.8
+
+- **Manual AutoPA moves take degrees/minutes/seconds.** Ekos states the polar
+  error that way ("Corrected az: -01° 52' 00\""), so entering it no longer
+  means converting to arcminutes in your head. The row shows the arcminute
+  equivalent as you type and says when a value exceeds the axis travel limit.
+  Quick buttons now cover ±30' as well, for the first coarse correction.
+
+## 0.5.7
+
+- **Removed the duplicate DEC shutdown control.** "Move DEC to power-off
+  position" and "Move to shutdown position" did the same thing from the same
+  stored value; only the shutdown-position row remains, and it still updates
+  the DEC Home restore value for the next session.
+- Note on the LCD: the firmware exposes no command for the display.
+  `MeadeCommandProcessor` has no brightness handler at all, and
+  `LcdMenu::setBacklightBrightness()` is only reached from the mount's own
+  CAL > Brightness menu and from the EEPROM value read at boot. The setting is
+  stored in EEPROM but nothing can write that address remotely, so dimming or
+  switching the display off has to be done on the mount itself.
+
+## 0.5.6
+
+- **AutoPA no longer acts on a measurement taken before its own correction.**
+  An Ekos capture+solve takes around 25 s, so the refresh line that appears just
+  after a move was measured before it. The watcher accepted it, applied the same
+  correction a second time and overshot to the mirror image of the error
+  (-104' -> +104' -> -106' -> +109' ...), which never converged and made the
+  direction guard report a reversed axis that was in fact correct. Solutions
+  older than the end of the last correction are now skipped with a note.
+- **An oversized correction is clamped instead of refused.** Blocking the move
+  made the first, legitimately large correction impossible and pushed people to
+  raise the safety limit until it protected nothing; the axis now moves by the
+  limit and the next cycle continues.
+
 ## 0.5.5
 
 - **The longitude encoding is now calibrated against the mount.** Even with the
@@ -134,8 +205,8 @@ context; the detailed notes live in `docs/`.
   before the command was ever transmitted.
 - Blind (`@`) command acknowledgements are consumed, so they can no longer be
   mistaken for the reply to the next command.
-- A stale DEC homing offset is cleared (or stored deliberately, OATControl
-  style) so firmware Park stops where you expect.
+- A stale DEC homing offset is cleared (or stored deliberately) so firmware
+  Park stops where you expect.
 - Installers no longer install `*.py` as executable — KStars treats every
   executable in its extensions folder as an extension, and the unpaired file
   made the whole extension list come up empty.
