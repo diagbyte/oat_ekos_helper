@@ -54,7 +54,10 @@ drift = w.mount_lst_drift_minutes()
 print("drift detected: %.0f min" % drift[0])
 assert drift[0] > 5, "the stale clock should be spotted"
 
-# SET HOME must refuse while the clock is wrong
+# With the automatic clock write off, SET HOME must refuse while the clock is
+# wrong (with it on - the default - SET HOME writes the clock itself; see
+# test_clock_before_set_home.py).
+w.clock_before_home_chk.setChecked(False)
 w.finish_dec_manual_home()
 pump(1.5)
 print("SET HOME blocked:", bool(answers))

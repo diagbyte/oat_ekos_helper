@@ -89,6 +89,7 @@ class Mount:
             return ""
         if c in ("XSDLl", "XSDLu"): s.dec_low = s.dec_up = 0.0; return ""
         if c.startswith("XSS"): s.trim = float(c[3:]); return ""
+        if c.startswith("XST"): s.trk = int(c[3:]); return ""               # tracking stepper position
         if c.startswith("XSR"): s.ra_spd = float(c[3:]); return ""            # firmware: no reply
         if c.startswith("XSD") and not c.startswith("XSDL"): s.dec_spd = float(c[3:]); return ""
         if c.startswith("XSHD"): s.xshd = int(c[4:]); return ""

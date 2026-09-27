@@ -52,12 +52,18 @@ from xml.sax.saxutils import escape
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "OAT Helper"
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 # The firmware's only factory reset: clears the whole EEPROM (MeadeProtocol :XFR#).
 FACTORY_RESET_COMMAND = ":XFR#"
 # Blind no-op: the driver flushes its input before a blind write, and the
 # firmware ignores the unknown :Z family without replying.
 MEADE_FLUSH_NOOP = "@Z#"
+
+# Largest sidereal-time error accepted before SET HOME (1 min of RA = 15').
+CLOCK_OK_MINUTES = 1.0
+# Writing the clock re-bases the RA reference but keeps the tracking steps,
+# so after this much tracking since SET HOME it shifts every coordinate.
+TRACKED_WARN_SECONDS = 30.0
 
 # How the firmware answers (MeadeProtocol.hpp / parser, V1.13.x).
 _MEADE_NO_REPLY = ("hF", "hP", "Q", "XD", "XS", "MAL", "MAZ", "F+", "F-", "FS", "FF", "FQ")
@@ -995,6 +1001,7 @@ class OATHelper(QtWidgets.QMainWindow):
             "dec_home_offset_mode": "clear",
             "autopa_wait_two_solutions": True,
             "autohome_ra_on_connect": False,
+            "sync_clock_before_set_home": True,
             "restore_dec_home_on_connect": False,
             "slew_rate": "M",
             # Shutdown ("release") position: where the axes are left before
@@ -1707,15 +1714,26 @@ class OATHelper(QtWidgets.QMainWindow):
         step0 = QtWidgets.QLabel("⓪ Time/site → HA"); step0.setStyleSheet("font-weight:600")
         self.ha_status = QtWidgets.QLabel("Waiting for the INDI site/time")
         self.ha_sync_btn = QtWidgets.QPushButton("Update HA + apply")
-        self.ha_sync_btn.clicked.connect(self.sync_ha_time_location)
+        self.ha_sync_btn.clicked.connect(
+            lambda: self._confirm_mid_session_clock_write(self.sync_ha_time_location, "Updating HA"))
         self.clock_fix_btn = QtWidgets.QPushButton("Fix mount clock")
         self.clock_fix_btn.setToolTip(
             "Writes date, local time, UTC offset, site and sidereal time straight to the mount.\n"
             "Use it when the log reports a sidereal time mismatch; run SET HOME again afterwards.")
-        self.clock_fix_btn.clicked.connect(self.repair_mount_clock)
+        self.clock_fix_btn.clicked.connect(
+            lambda: self._confirm_mid_session_clock_write(self.repair_mount_clock, "Fixing the mount clock"))
         ha_row.addWidget(step0); ha_row.addWidget(self.ha_status, 1)
         ha_row.addWidget(self.clock_fix_btn); ha_row.addWidget(self.ha_sync_btn)
         v.addLayout(ha_row)
+        self.clock_before_home_chk = QtWidgets.QCheckBox("Write the mount clock (HA) automatically before SET HOME")
+        self.clock_before_home_chk.setToolTip(
+            "SET HOME stores the mount's sidereal time as the RA reference. With this on, date, time, UTC offset,\n"
+            "site and sidereal time are written from this computer right before :SHP#, and SET HOME stops if\n"
+            "the mount is still more than 1 min out.")
+        self.clock_before_home_chk.setChecked(bool(self.cfg.get("sync_clock_before_set_home", True)))
+        self.clock_before_home_chk.toggled.connect(
+            lambda on: self.cfg.__setitem__("sync_clock_before_set_home", bool(on)))
+        v.addWidget(self.clock_before_home_chk)
 
         # --- 1. RA AutoHome -------------------------------------------------
         auto = QtWidgets.QGroupBox("① RA AutoHome — Hall Sensor")
@@ -3079,6 +3097,134 @@ class OATHelper(QtWidgets.QMainWindow):
             return int(hours) + int(minutes) / 60.0 + int(seconds) / 3600.0
         return None
 
+    @staticmethod
+    def _computed_lst_hours(lon):
+        """Local sidereal time for this computer's clock at longitude lon (east +)."""
+        now_utc = datetime.now(timezone.utc)
+        days = now_utc.timestamp() / 86400.0 + 2440587.5 - 2451545.0
+        return (18.697374558 + 24.06570982441908 * days + float(lon) / 15.0) % 24.0
+
+    @staticmethod
+    def _lst_gap_minutes(a, b):
+        return abs((a - b + 12.0) % 24.0 - 12.0) * 60.0
+
+    @staticmethod
+    def _host_clock_status():
+        """(trusted, detail) for this computer's clock; trusted is None when unknown.
+
+        The mount has no clock of its own that survives power-off, so it gets
+        whatever this computer says. Trusted means NTP-synchronised or a
+        hardware RTC is present (a Pi 5 with its RTC battery, an RTC HAT).
+        """
+        if datetime.now().year < 2025:
+            return False, "the system clock reads a date before 2025"
+        ntp = None
+        try:
+            r = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                               capture_output=True, text=True, timeout=3)
+            if r.returncode == 0 and r.stdout.strip() in ("yes", "no"):
+                ntp = r.stdout.strip() == "yes"
+        except Exception:
+            pass
+        if ntp:
+            return True, "NTP synchronised"
+        if any(Path(p).exists() for p in ("/dev/rtc0", "/sys/class/rtc/rtc0")):
+            return True, "hardware RTC"
+        if ntp is False:
+            return False, "not NTP-synchronised and no hardware RTC found"
+        return None, "unknown"
+
+    def _write_mount_lst(self, lst_h):
+        hours = int(lst_h)
+        minutes = int((lst_h - hours) * 60)
+        seconds = int(round((lst_h - hours - minutes / 60.0) * 3600))
+        if seconds == 60:
+            seconds, minutes = 0, minutes + 1
+        if minutes == 60:
+            minutes, hours = 0, (hours + 1) % 24
+        self.indi.meade(f"@SHL{hours:02d}{minutes:02d}{seconds:02d}#")
+        time.sleep(0.3)
+
+    def _sync_mount_clock_blocking(self):
+        """Write this computer's clock and the INDI site to the mount, then verify.
+
+        Blocking - call from a worker. Returns (drift_min, mount_lst,
+        computed_lst, note). Raises RuntimeError when the site is unknown or
+        the mount's sidereal time is still more than CLOCK_OK_MINUTES out.
+        """
+        info = self.site_angles()
+        if not info:
+            raise RuntimeError("the observing site is unknown - set the KStars Geographic Location "
+                               "and connect the mount in Ekos first")
+        now_local = datetime.now().astimezone()
+        offset = now_local.utcoffset().total_seconds() / 3600.0 if now_local.utcoffset() else 0.0
+        lon = info["lon"]
+        after = self.write_mount_clock(info["lat"], lon, self._computed_lst_hours(lon), offset)
+        note = ""
+        lst = after.get("lst")
+        drift = None if lst is None else self._lst_gap_minutes(lst, self._computed_lst_hours(lon))
+        if drift is not None and drift > CLOCK_OK_MINUTES:
+            # Site right but LST wrong: the longitude encoding is the usual culprit.
+            label, command, _d = self._calibrate_longitude(lon, self._computed_lst_hours(lon))
+            if label:
+                self.cfg["longitude_command"] = command
+                note = f"longitude written as '{label}'"
+                self._write_mount_lst(self._computed_lst_hours(lon))
+                lst = self._read_mount_lst()
+                drift = None if lst is None else self._lst_gap_minutes(lst, self._computed_lst_hours(lon))
+        if lst is None:
+            raise RuntimeError("the mount did not report its sidereal time (:XGL#) after the clock was written")
+        if drift > CLOCK_OK_MINUTES:
+            raise RuntimeError(f"the mount's sidereal time is still {drift:.1f} min out after writing the clock "
+                               f"(mount {self._hours_to_hms(lst)}, expected "
+                               f"{self._hours_to_hms(self._computed_lst_hours(lon))}); check the site in KStars")
+        return drift, lst, self._computed_lst_hours(lon), note
+
+    def _tracked_seconds_since_home(self):
+        """Seconds the tracking stepper has run since SET HOME (None if unknown)."""
+        gx = self._parse_gx(self.indi.meade(":GX#"))
+        trk = gx.get("trk_steps")
+        try:
+            speed = float(str(self.indi.meade(":XGT#")).strip().rstrip("#"))
+        except ValueError:
+            speed = 0.0
+        if trk is None or speed <= 0:
+            return None
+        return abs(trk) / speed
+
+    def _confirm_mid_session_clock_write(self, action, what):
+        """Run action() - after a warning if the mount has tracked since SET HOME.
+
+        Every clock/site write makes the firmware re-base its RA reference on
+        the new sidereal time, but the tracking steps accumulated since SET HOME
+        stay, so they are counted twice: every coordinate shifts by the time
+        tracked (1 min = 15').
+        """
+        if not self.indi.running:
+            action(); return
+
+        def done(secs):
+            if secs is not None and secs > TRACKED_WARN_SECONDS:
+                minutes = secs / 60.0
+                answer = QtWidgets.QMessageBox.question(
+                    self, _("Mount clock"), _(
+                        "The mount has tracked for {minutes:.1f} min since SET HOME. {what} now re-bases the RA "
+                        "reference and shifts every coordinate by about {degrees:.2f}°.\n\n"
+                        "Afterwards run SET HOME again, or Solve & Sync in Ekos. Continue?").format(
+                            minutes=minutes, what=_(what), degrees=secs / 240.0),
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+                if answer != QtWidgets.QMessageBox.Yes:
+                    self.log(f"{what} cancelled: the mount has tracked {minutes:.1f} min since SET HOME.",
+                             logging.WARNING)
+                    return
+                self.log(f"⚠ {what} after {minutes:.1f} min of tracking: coordinates shift by about "
+                         f"{secs / 240.0:.2f}°. Run SET HOME again, or Solve & Sync in Ekos.", logging.WARNING)
+            action()
+
+        self.run_async(self._tracked_seconds_since_home, done,
+                       lambda e: (self.log(f"Could not read the tracking steps ({e}); continuing.",
+                                           logging.WARNING), action()))
+
     def mount_lst_drift_minutes(self):
         """How far the mount's LST is from the one computed for this site.
 
@@ -3732,11 +3878,16 @@ class OATHelper(QtWidgets.QMainWindow):
             dec_steps = int(float(parts[3]))
         except Exception as exc:
             raise RuntimeError(f"Invalid stepper positions in :GX# response: {gx_text!r}") from exc
+        try:
+            trk_steps = int(float(parts[4])) if len(parts) > 4 and parts[4] != "" else None
+        except ValueError:
+            trk_steps = None
         return {
             "state": parts[0],
             "motion": parts[1] if len(parts) > 1 else "",
             "ra_steps": ra_steps,
             "dec_steps": dec_steps,
+            "trk_steps": trk_steps,
             "raw": str(gx_text),
         }
 
@@ -3962,7 +4113,23 @@ class OATHelper(QtWidgets.QMainWindow):
         even though the command was executed.  The *authoritative* success
         check is therefore the live :GX# readback, not the reply character.
         Returns (gx_before, reply, gx_after).
+
+        Before :SHP# the mount clock is written from this computer (unless the
+        Home-tab option is off): SET HOME stores the mount's sidereal time as
+        the RA reference and zeroes the tracking steps, so writing the clock
+        right before it is the one order that is always correct. A clock that
+        cannot be verified aborts SET HOME.
         """
+        if self.cfg.get("sync_clock_before_set_home", True):
+            trusted, why = self._host_clock_status()
+            if trusted is False:
+                self.indi.logMessage.emit(
+                    f"⚠ This computer's clock may be wrong ({why}); it is written to the mount before SET HOME.")
+            drift, lst, computed, note = self._sync_mount_clock_blocking()
+            self.indi.logMessage.emit(
+                f"✓ Mount clock written before SET HOME: LST {self._hours_to_hms(lst)} "
+                f"(expected {self._hours_to_hms(computed)}, {drift * 60.0:.0f} s off)"
+                + (f", {note}" if note else ""))
         gx_before = self._wait_for_ra_dec_idle(wait_ra=True, wait_dec=True, timeout=30.0)
 
         def try_once(prefix):
@@ -4014,12 +4181,12 @@ class OATHelper(QtWidgets.QMainWindow):
         # :SHP# stores the mount's own idea of sidereal time as the RA home
         # reference. Doing that with a stale LST silently breaks every later
         # GOTO, so check before writing anything.
-        drift = self.mount_lst_drift_minutes()
-        if drift is not None and drift[0] > 5.0:
+        drift = None if self.cfg.get("sync_clock_before_set_home", True) else self.mount_lst_drift_minutes()
+        if drift is not None and drift[0] > CLOCK_OK_MINUTES:
             minutes, mount_lst, computed = drift
             answer = QtWidgets.QMessageBox.warning(
                 self, _("SET HOME"), _(
-                    "The mount's sidereal time is {minutes:.0f} min away from the time computed for your site "
+                    "The mount's sidereal time is {minutes:.1f} min away from the time computed for your site "
                     "(mount {mount}, expected {expected}).\n\n"
                     "SET HOME stores that value as the RA reference, so a GOTO may flip across the meridian and "
                     "drive DEC the wrong way.\n\n"
@@ -4029,7 +4196,7 @@ class OATHelper(QtWidgets.QMainWindow):
                         expected=self._hours_to_hms(computed)),
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
             if answer != QtWidgets.QMessageBox.Yes:
-                self.log(f"SET HOME cancelled: mount LST is {minutes:.0f} min off "
+                self.log(f"SET HOME cancelled: mount LST is {minutes:.1f} min off "
                          f"({self._hours_to_hms(mount_lst)} vs {self._hours_to_hms(computed)}). "
                          "Fixing the mount clock now.", logging.WARNING)
                 self.repair_mount_clock()

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.6
+
+- **SET HOME writes the mount clock first.** The mount keeps no time across a
+  power cycle (the date restarts at 2021-01-01 and the last session's HA is
+  reloaded from EEPROM), and SET HOME stores the mount's sidereal time as the
+  RA reference while zeroing the tracking steps. So right before `:SHP#` the
+  date, local time, UTC offset, site and LST are written from this computer
+  and read back; if the longitude encoding is the problem it is corrected on
+  the way. This covers every SET HOME path (Home tab, wizard, Restore DEC
+  Home). If the site is unknown or the mount is still more than 1 min out,
+  SET HOME stops instead of storing a wrong reference. Home tab option:
+  "Write the mount clock (HA) automatically before SET HOME" (on by default).
+- **Tolerance 5 min -> 1 min.** With the automatic write turned off, SET HOME
+  still checks the mount clock, but now refuses anything over 1 min (5 min
+  was 1.25° of RA accepted silently).
+- **HA / clock buttons warn after tracking.** Any clock or site write makes
+  the firmware re-base its RA reference on the new sidereal time while the
+  tracking steps since SET HOME stay, so they are counted twice. "Update HA +
+  apply" and "Fix mount clock" read the tracking steps (`:GX#` / `:XGT#`)
+  first; after more than 30 s of tracking they say how far every coordinate
+  will shift (1 min = 15') and advise SET HOME or Solve & Sync, and can be
+  cancelled.
+- A warning is logged before SET HOME when this computer's clock is neither
+  NTP-synchronised nor backed by a hardware RTC.
+- `:GX#` parsing also returns the tracking stepper position. The fake mount
+  accepts `:XST` (tracking position); `tests/test_clock_before_set_home.py`
+  covers the above.
+
 ## 0.6.5
 
 - **AutoHome stopped working in 0.6.4 ("No reply byte for &MHRR30#").** 0.6.4
