@@ -52,12 +52,29 @@ from xml.sax.saxutils import escape
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "OAT Helper"
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 # The firmware's only factory reset: clears the whole EEPROM (MeadeProtocol :XFR#).
 FACTORY_RESET_COMMAND = ":XFR#"
 # Blind no-op: the driver flushes its input before a blind write, and the
 # firmware ignores the unknown :Z family without replying.
 MEADE_FLUSH_NOOP = "@Z#"
+
+# How the firmware answers (MeadeProtocol.hpp / parser, V1.13.x).
+_MEADE_NO_REPLY = ("hF", "hP", "Q", "XD", "XS", "MAL", "MAZ", "F+", "F-", "FS", "FF", "FQ")
+_MEADE_NO_REPLY_EXACT = ("I", "Rs", "RS", "RM", "RC", "RG", "Mn", "Ms", "Me", "Mw",
+                         "F1", "F2", "F3", "F4")
+_MEADE_ONE_CHAR = ("MX", "MH", "MT", "MAAH", "MS", "hU", "hZ", "FP", "FB", "gT")
+
+
+def meade_reply_kind(body):
+    """'none', 'char' (one character, no '#') or 'hash' for a command body
+    (without the leading ':' and the trailing '#')."""
+    body = str(body)
+    if body in _MEADE_NO_REPLY_EXACT or body.startswith(("Mg", "MG")) or body.startswith(_MEADE_NO_REPLY):
+        return "none"
+    if body.startswith(_MEADE_ONE_CHAR) or (body.startswith("S") and not body.startswith("SC")):
+        return "char"
+    return "hash"
 DEFAULT_DEVICE = "LX200 OpenAstroTech"
 CONFIG_DIR = Path.home() / ".config" / "oat-helper"
 DATA_DIR = Path.home() / ".local" / "share" / "oat-helper"
@@ -278,6 +295,10 @@ class IndiClient(QtCore.QObject):
         # '@' commands with a setTextVector (libindi >= 2.0.4 does).
         self.blind_ack_supported: Optional[bool] = None
         self._blind_ack_misses = 0
+        # True after a blind ('@') command whose firmware answer is one
+        # character: the driver never reads it, and the next ':'/'&' read
+        # would get it glued in front of its own reply.
+        self._wire_dirty = False
         self.seen_properties = set()
         # Every device name the server has announced, for the picker.
         self.known_devices = []
@@ -672,7 +693,8 @@ class IndiClient(QtCore.QObject):
         command prefixes supported by LX200 OpenAstroTech:
           ':' normal # terminated response
           '@' blind / no-response command
-          '&' one-character response
+          '&' one-character response (getCommandChar - unreliable on some
+              builds, so the helper itself sends one-character commands blind)
         """
         if not self.has_meade():
             self.request_properties()
@@ -689,46 +711,66 @@ class IndiClient(QtCore.QObject):
         if not self.meade_lock.acquire(timeout=float(timeout) + 15.0):
             raise TimeoutError(f"Meade channel busy; could not send {command}")
         try:
-            ev = threading.Event()
-            with self.pending_lock:
-                self.pending_event = ev
-                self.pending_result = None
-            try:
-                self.send_text(self.meade_vector, self.meade_element, command)
-                if command.startswith("@"):
-                    # '@' is the LX200 OpenAstroTech wrapper for a command that
-                    # does not return a Meade payload (XSHR/XSHD/MXr/MXd/MHR/hF).
-                    # libindi >= 2.0.4 still answers with an (empty) setTextVector.
-                    # Consume that ack here so it can never be mistaken for the
-                    # reply of the next ':' command (0.4.1 only slept 0.12 s and
-                    # could feed "" into _parse_gx / the SET HOME verifier).
-                    if self.blind_ack_supported is False:
-                        time.sleep(0.12)
-                        return ""
-                    if ev.wait(1.5):
-                        self.blind_ack_supported = True
-                        self._blind_ack_misses = 0
-                    else:
-                        self._blind_ack_misses += 1
-                        if self._blind_ack_misses >= 2 and self.blind_ack_supported is None:
-                            self.blind_ack_supported = False
-                            self.logMessage.emit(
-                                "INDI driver does not acknowledge blind '@' Meade commands; "
-                                "falling back to fixed delay (old lx200_OpenAstroTech?)")
-                    return ""
-                if not ev.wait(timeout):
-                    raise TimeoutError(f"No reply for {command}")
-                with self.pending_lock:
-                    result = self.pending_result or ""
-                if command.startswith("&"):
-                    result = self._clean_single_char_reply(command, result)
-                return result
-            finally:
-                with self.pending_lock:
-                    self.pending_event = None
-                    self.pending_result = None
+            prefix = command[:1]
+            if prefix in ":&" and self._wire_dirty:
+                # A blind write makes the driver flush its input first
+                # (flushIO), and the firmware ignores :Z without answering.
+                self._wire_dirty = False
+                try:
+                    self._transact(MEADE_FLUSH_NOOP, 3.0)
+                except Exception:
+                    pass
+            result = self._transact(command, timeout)
+            if prefix == "@":
+                self._wire_dirty = meade_reply_kind(command[1:].rstrip("#")) == "char"
+            elif prefix == "&" and result == "":
+                self._wire_dirty = True     # the byte may still arrive late
+            else:
+                self._wire_dirty = False
+            return result
         finally:
             self.meade_lock.release()
+
+    def _transact(self, command, timeout):
+        """One Meade round trip; the caller holds meade_lock."""
+        ev = threading.Event()
+        with self.pending_lock:
+            self.pending_event = ev
+            self.pending_result = None
+        try:
+            self.send_text(self.meade_vector, self.meade_element, command)
+            if command.startswith("@"):
+                # '@' is the LX200 OpenAstroTech wrapper for a command whose
+                # answer is not read (XSHR/XSHD/MXr/MXd/MHR/hF ...).
+                # libindi >= 2.0.4 still answers with an (empty) setTextVector.
+                # Consume that ack here so it can never be mistaken for the
+                # reply of the next ':' command (0.4.1 only slept 0.12 s and
+                # could feed "" into _parse_gx / the SET HOME verifier).
+                if self.blind_ack_supported is False:
+                    time.sleep(0.12)
+                    return ""
+                if ev.wait(1.5):
+                    self.blind_ack_supported = True
+                    self._blind_ack_misses = 0
+                else:
+                    self._blind_ack_misses += 1
+                    if self._blind_ack_misses >= 2 and self.blind_ack_supported is None:
+                        self.blind_ack_supported = False
+                        self.logMessage.emit(
+                            "INDI driver does not acknowledge blind '@' Meade commands; "
+                            "falling back to fixed delay (old lx200_OpenAstroTech?)")
+                return ""
+            if not ev.wait(timeout):
+                raise TimeoutError(f"No reply for {command}")
+            with self.pending_lock:
+                result = self.pending_result or ""
+            if command.startswith("&"):
+                result = self._clean_single_char_reply(command, result)
+            return result
+        finally:
+            with self.pending_lock:
+                self.pending_event = None
+                self.pending_result = None
 
     # A failed one-character read comes back as the byte 0xFF: the
     # lx200_OpenAstroTech driver returns char(-1) from getCommandChar(), and
@@ -2478,7 +2520,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if not self.indi.running:
             self.log("An INDI connection is required.", logging.WARNING); return
         def job():
-            reply = self.indi.meade("&hU#")
+            reply = self.indi.meade("@hU#")
             tracking, gx = self._read_tracking_state()
             return reply, tracking, gx
         def done(res):
@@ -2567,7 +2609,7 @@ class OATHelper(QtWidgets.QMainWindow):
 
         def job():
             if self.cfg.get("release_stop_tracking", True):
-                self.indi.meade("&MT0#")
+                self.indi.meade("@MT0#")
                 time.sleep(0.2)
             if at_home_first:
                 self.indi.meade("@hF#")
@@ -2580,7 +2622,7 @@ class OATHelper(QtWidgets.QMainWindow):
             dec_steps = self._dec_steps_for_degrees(dec_deg, dec_spd)
             moved_dec = 0
             if dec_steps:
-                self.indi.meade(f"&MXd{dec_steps}#")
+                self.indi.meade(f"@MXd{dec_steps}#")
                 end = self._wait_for_dec_idle(timeout=180.0)
                 moved_dec = int(end["dec_steps"]) - int(start["dec_steps"])
                 if abs(moved_dec - dec_steps) > max(4, abs(dec_steps) // 100):
@@ -2591,7 +2633,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 ra_spd = self._read_ra_steps_per_degree()
                 ra_steps = self._ra_steps_for_degrees(ra_deg, ra_spd)
                 if ra_steps:
-                    self.indi.meade(f"&MXr{ra_steps}#")
+                    self.indi.meade(f"@MXr{ra_steps}#")
                     self._wait_for_ra_dec_idle(wait_ra=True, timeout=180.0)
             return started_at_home, moved_dec
 
@@ -2832,7 +2874,7 @@ class OATHelper(QtWidgets.QMainWindow):
         repair appears to do nothing. The same happened after any
         one-character command sent blind ('@'): the driver never reads its
         "1", and neither getCommandString() nor getCommandChar() flushes before
-        writing. Those are sent as '&' now. :GVN# is a safe anchor: its answer
+        writing (IndiClient now flushes after those). :GVN# is a safe anchor: its answer
         is recognisable, but reading alone cannot catch up: every read that
         consumes a stale reply leaves its own answer behind, so the channel
         stayed one reply behind until some later blind command happened to
@@ -2874,7 +2916,7 @@ class OATHelper(QtWidgets.QMainWindow):
         now_local = datetime.now()
         # :SGsHH# is the Meade convention (hours to add to local time to get
         # UTC), so it is the negated site offset.
-        self.indi.meade(f"&SG{-offset_hours:+03.0f}#")
+        self.indi.meade(f"@SG{-offset_hours:+03.0f}#")
         time.sleep(0.2)
         wanted_date = now_local.strftime("%m/%d/%y")
         current_date = str(self.indi.meade(":GC#")).strip().rstrip("#")
@@ -2885,10 +2927,10 @@ class OATHelper(QtWidgets.QMainWindow):
             self._resync_meade()
         else:
             self.logger.debug("Mount date already %s, not rewriting it", current_date)
-        self.indi.meade(f"&SL{now_local.strftime('%H:%M:%S')}#")
+        self.indi.meade(f"@SL{now_local.strftime('%H:%M:%S')}#")
         time.sleep(0.2)
         lat_deg = int(abs(lat)); lat_min = int(round((abs(lat) - lat_deg) * 60))
-        self.indi.meade(f"&St{'+' if lat >= 0 else '-'}{lat_deg:02d}*{lat_min:02d}#")
+        self.indi.meade(f"@St{'+' if lat >= 0 else '-'}{lat_deg:02d}*{lat_min:02d}#")
         time.sleep(0.2)
         # Signed longitudes are "negative going east" in this firmware.
         stored = self.cfg.get("longitude_command")
@@ -2904,7 +2946,7 @@ class OATHelper(QtWidgets.QMainWindow):
             seconds, minutes = 0, minutes + 1
         if minutes == 60:
             minutes, hours = 0, (hours + 1) % 24
-        self.indi.meade(f"&SHL{hours:02d}{minutes:02d}{seconds:02d}#")
+        self.indi.meade(f"@SHL{hours:02d}{minutes:02d}{seconds:02d}#")
         time.sleep(0.3)
         return self._mount_clock_snapshot()
 
@@ -2928,9 +2970,9 @@ class OATHelper(QtWidgets.QMainWindow):
             if minutes == 60:
                 minutes, degrees = 0, degrees + 1
             if label.startswith("signed"):
-                candidates.append((label, f"&Sg{'-' if value < 0 else '+'}{degrees:03d}*{minutes:02d}#"))
+                candidates.append((label, f"@Sg{'-' if value < 0 else '+'}{degrees:03d}*{minutes:02d}#"))
             else:
-                candidates.append((label, f"&Sg{degrees:03d}*{minutes:02d}#"))
+                candidates.append((label, f"@Sg{degrees:03d}*{minutes:02d}#"))
         return candidates
 
     def _calibrate_longitude(self, lon_east, computed_lst):
@@ -2980,7 +3022,7 @@ class OATHelper(QtWidgets.QMainWindow):
                     hours = int(computed)
                     minutes = int((computed - hours) * 60)
                     seconds = int(round((computed - hours - minutes / 60.0) * 3600))
-                    self.indi.meade(f"&SHL{hours:02d}{minutes:02d}{seconds:02d}#")
+                    self.indi.meade(f"@SHL{hours:02d}{minutes:02d}{seconds:02d}#")
                     time.sleep(0.3)
                 after = self._mount_clock_snapshot()
             return before, after, computed, fixed_by
@@ -3122,9 +3164,9 @@ class OATHelper(QtWidgets.QMainWindow):
             # Existing firmware-native relative jog commands only; no new
             # command and no :Q# are introduced here.
             if ra_steps:
-                self.indi.meade(f"&MXr{ra_steps}#")
+                self.indi.meade(f"@MXr{ra_steps}#")
             if dec_motor_steps:
-                self.indi.meade(f"&MXd{dec_motor_steps}#")
+                self.indi.meade(f"@MXd{dec_motor_steps}#")
 
             gx_end = self._wait_for_ra_dec_idle(
                 wait_ra=bool(ra_steps), wait_dec=bool(dec_motor_steps), timeout=90.0)
@@ -3248,7 +3290,7 @@ class OATHelper(QtWidgets.QMainWindow):
     def set_tracking(self, enabled):
         if not self.indi.running:
             self.log("An INDI connection is required.", logging.WARNING); return
-        cmd = "&MT1#" if enabled else "&MT0#"
+        cmd = "@MT1#" if enabled else "@MT0#"
         want = "ON" if enabled else "OFF"
         def job():
             reply = self.indi.meade(cmd)
@@ -3258,7 +3300,7 @@ class OATHelper(QtWidgets.QMainWindow):
             reply, tracking, gx = res
             state = "ON" if tracking else "OFF"
             if tracking == bool(enabled):
-                note = "" if reply == "1" else f" (reply byte {reply!r} ignored)"
+                note = "" if reply in ("", "1") else f" (reply {reply!r} ignored)"
                 self.log(f"✓ Tracking {state} - verified by :GX# ({gx['state']}, {gx['motion']}){note}")
             else:
                 self.log(f"✗ Tracking {want} requested, but :GX# reports {state} "
@@ -3416,7 +3458,7 @@ class OATHelper(QtWidgets.QMainWindow):
             if minutes == 60:
                 minutes = 0
                 hours = (hours + 1) % 24
-            self.indi.meade(f"&SHL{hours:02d}{minutes:02d}{seconds:02d}#")
+            self.indi.meade(f"@SHL{hours:02d}{minutes:02d}{seconds:02d}#")
             time.sleep(0.3)
             mount_lst = self._read_mount_lst()
             mount_date = str(self.indi.meade(":GC#")).strip().rstrip("#")
@@ -3789,7 +3831,7 @@ class OATHelper(QtWidgets.QMainWindow):
             if motor_steps == 0:
                 raise RuntimeError(f"DEC {user_degrees:+g}° converts to 0 step (XGD={spd})")
             gx_start = self._parse_gx(self.indi.meade(":GX#"))
-            self.indi.meade(f"&MXd{motor_steps}#")
+            self.indi.meade(f"@MXd{motor_steps}#")
             gx_end = self._wait_for_dec_idle(timeout=90.0)
             return spd, motor_steps, gx_start["dec_steps"], gx_end["dec_steps"]
 
@@ -3856,7 +3898,7 @@ class OATHelper(QtWidgets.QMainWindow):
             if steps == 0:
                 raise RuntimeError(f"RA {user_degrees:+g}° converts to 0 step (XGR={spd})")
             gx_start = self._parse_gx(self.indi.meade(":GX#"))
-            self.indi.meade(f"&MXr{steps}#")
+            self.indi.meade(f"@MXr{steps}#")
             gx_end = self._wait_for_ra_dec_idle(wait_ra=True, timeout=90.0)
             return spd, steps, gx_start, gx_end
 
@@ -3937,11 +3979,14 @@ class OATHelper(QtWidgets.QMainWindow):
                     return reply, gx_after, True
             return reply, gx_after, False
 
-        reply, gx_after, ok = try_once(":")
+        # Blind first: the one-character reply path (getCommandChar) fails on
+        # some builds; :GX# is the real check anyway. ':' is the fallback for
+        # a driver that does not forward '@'.
+        reply, gx_after, ok = try_once("@")
         if not ok:
-            self.logger.warning("SHP via ':' not verified (reply=%r, GX=%s); retrying with '&'",
-                                reply, gx_after and gx_after.get("raw"))
-            reply, gx_after, ok = try_once("&")
+            self.logger.warning("SHP via '@' not verified (GX=%s); retrying with ':'",
+                                gx_after and gx_after.get("raw"))
+            reply, gx_after, ok = try_once(":")
         if not ok:
             raise RuntimeError(
                 "Set Home verify failed: firmware did not re-zero both axes "
@@ -4120,7 +4165,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 raise RuntimeError(
                     f"GX DEC={gx0['dec_steps']} ≠ 0: DEC has already moved. Restoring is only possible right after power-on.")
             if move != 0:
-                self.indi.meade(f"&MXd{move}#")
+                self.indi.meade(f"@MXd{move}#")
                 gx1 = self._wait_for_dec_idle(timeout=120.0)
                 moved = int(gx1["dec_steps"])
                 if abs(moved - move) > max(4, abs(move) // 100):
@@ -4171,7 +4216,7 @@ class OATHelper(QtWidgets.QMainWindow):
             current = int(gx_start["dec_steps"])
             delta = -current
             if delta != 0:
-                self.indi.meade(f"&MXd{delta}#")
+                self.indi.meade(f"@MXd{delta}#")
                 gx_end = self._wait_for_dec_idle(timeout=90.0)
             else:
                 gx_end = gx_start
@@ -4222,13 +4267,12 @@ class OATHelper(QtWidgets.QMainWindow):
         axis = self.home_sequence.pop(0)
         rng = max(5, self.home_range.value())
         # MHR/MHD answer one character ("1" = search started) without '#'.
-        # They are sent as '&' so the driver reads that byte: sent blind ('@')
-        # it stayed in the serial buffer and was glued to the next reply
-        # (a date read as "109/27/26"). The "garbled byte" that once made
-        # '&' look unreliable was the ARM char(-1) -> 0xFF driver bug, which
-        # IndiClient now turns into "no reply". GX/XGAH still verify the result.
-        if axis == "RA": cmd = f"&MHR{self.ra_dir.currentData()}{rng}#"
-        else: cmd = f"&MHD{self.dec_dir.currentData()}{rng}#"
+        # The driver's one-character read (getCommandChar) is not reliable on
+        # every build - on a Raspberry Pi it can fail for every '&' command -
+        # so they are sent blind and GX/XGAH verify the result. IndiClient
+        # flushes the unread "1" before the next read (see _wire_dirty).
+        if axis == "RA": cmd = f"@MHR{self.ra_dir.currentData()}{rng}#"
+        else: cmd = f"@MHD{self.dec_dir.currentData()}{rng}#"
         self.log(f"Starting {axis} AutoHome: {cmd[1:]}")
         def job():
             # Hall homing ends with firmware setHome(false), which re-zeroes DEC
@@ -4353,10 +4397,11 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log("Start the offset calibration first.", logging.WARNING); return
         if self.home_busy:
             self.log("Jog after AutoHome has finished.", logging.WARNING); return
-        # :MXr/:MXd answer "1" without '#'. Sent as '&' so the driver reads
-        # that byte; blind ('@') it stayed on the wire and shifted the next
-        # reply (see _resync_meade). The jog is counted once it is accepted.
-        cmd = f"&MXr{steps}#" if axis=="RA" else f"&MXd{steps}#"
+        # :MXr/:MXd answer "1" without '#'. They are sent blind because the
+        # driver's one-character read is unreliable on some builds; IndiClient
+        # flushes that "1" before the next read. The jog is counted once the
+        # command is accepted.
+        cmd = f"@MXr{steps}#" if axis=="RA" else f"@MXd{steps}#"
         def done(_result):
             if axis=="RA":
                 self.ra_cal_jog += steps
@@ -4653,7 +4698,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if self.pa_motion_active:
             self.log("AutoPA is moving; Zero-home request ignored.", logging.WARNING)
             return
-        self.meade_async("&MAAH#", lambda r: self.log(f"AutoPA home request reply: {r}"))
+        self.meade_async("@MAAH#", lambda r: self.log("AutoPA home request sent (:MAAH#)."))
 
     def pa_set_zero(self):
         if self.pa_motion_active:
@@ -4664,7 +4709,7 @@ class OATHelper(QtWidgets.QMainWindow):
               "Use it only when redefining the physical reference point. Continue?"),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
         if ans != QtWidgets.QMessageBox.Yes: return
-        self.meade_async("&hZ#", lambda r: (self.log(f"AutoPA zero saved, reply={r}"), self.read_pa_position()))
+        self.meade_async("@hZ#", lambda r: (self.log("AutoPA zero save sent (:hZ#)."), self.read_pa_position()))
 
     @staticmethod
     def _parse_paa_angle(text):
@@ -5199,8 +5244,8 @@ class OATHelper(QtWidgets.QMainWindow):
         if not self.axis_start: self.log('Record Start Solve first.',logging.WARNING); return
         axis=self.axis_sel.currentText(); deg=float(self.axis_move.value()); self.axis_name=axis; self.axis_commanded_deg=deg
         def job():
-            if axis=='RA': spd=self._read_ra_steps_per_degree(); self.indi.meade(f'&MXr{int(round(deg*spd))}#')
-            else: spd=self._read_dec_steps_per_degree(); self.indi.meade(f'&MXd{int(round(deg*spd))}#')
+            if axis=='RA': spd=self._read_ra_steps_per_degree(); self.indi.meade(f'@MXr{int(round(deg*spd))}#')
+            else: spd=self._read_dec_steps_per_degree(); self.indi.meade(f'@MXd{int(round(deg*spd))}#')
             self._wait_for_ra_dec_idle(wait_ra=axis=='RA',wait_dec=axis=='DEC',timeout=180); return spd
         self.run_async(job,lambda spd:self.log(f'{axis} {deg:+.3f}° move complete (steps/deg={spd:.6f}). Run Capture & Solve then Sync in Ekos and record End Solve.'))
 
@@ -5432,25 +5477,17 @@ class OATHelper(QtWidgets.QMainWindow):
             def done(items): self.config_text.appendPlainText("\nRuntime\n"+"\n".join(f"{k:16} {v}" for k,v in items))
             self.run_async(job,done)
 
-    # How the firmware answers (MeadeProtocol.hpp / parser, V1.13.x).  A ':'
-    # command that gets no '#'-terminated reply makes the driver wait for its
-    # timeout while holding the serial port; a one-character reply sent blind
-    # stays in the buffer and corrupts the next read.
-    _MEADE_NO_REPLY = ("hF", "hP", "Q", "XD", "XS", "MAL", "MAZ", "F+", "F-", "FS", "FF", "FQ")
-    _MEADE_NO_REPLY_EXACT = ("I", "Rs", "RS", "RM", "RC", "RG", "Mn", "Ms", "Me", "Mw",
-                             "F1", "F2", "F3", "F4")
-    _MEADE_ONE_CHAR = ("MX", "MH", "MT", "MAAH", "MS", "hU", "hZ", "FP", "FB", "gT")
+    @staticmethod
+    def _meade_prefix_for(body):
+        """':' only for '#'-terminated answers, '@' for everything else.
 
-    @classmethod
-    def _meade_prefix_for(cls, body):
-        """'@' for no reply, '&' for one character, ':' for '#'-terminated."""
-        if body in cls._MEADE_NO_REPLY_EXACT or body.startswith(("Mg", "MG")):
-            return "@"
-        if body.startswith(cls._MEADE_NO_REPLY):
-            return "@"
-        if body.startswith(cls._MEADE_ONE_CHAR) or (body.startswith("S") and not body.startswith("SC")):
-            return "&"
-        return ":"
+        A ':' command without a '#' reply makes the driver wait for its
+        timeout while holding the serial port. One-character answers are sent
+        blind too, because the driver's one-character read is unreliable on
+        some builds; IndiClient flushes the unread byte before the next read.
+        Type '&' explicitly to read the character anyway.
+        """
+        return ":" if meade_reply_kind(body) == "hash" else "@"
 
     def _normalize_command(self,cmd):
         cmd=(cmd or "").strip()

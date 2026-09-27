@@ -15,16 +15,19 @@ class Mount:
         s.date = "09/18/26"; s.localtime = "00:35:47"; s.offset = "-09"
         s.lat = "+37*34"; s.lon = "-127*00"; s.lon_deg = -127.0; s.extra_reply = None; s.lst_manual = None
         s.tracking = True
+        s.home_ra = None; s.home_polls = 0     # RA Hall AutoHome (:MHR / :XGAH#)
         # lx200_OpenAstroTech on ARM: getCommandChar() returns char(-1) on a
         # failed read, plain char is unsigned there, so the driver publishes
         # the byte 0xFF as the reply of an '&' command.
-        s.char_fail = False
+        # FAKE_CHAR_FAIL=1 starts in that state: every '&' read fails, as on
+        # the Raspberry Pi build that made AutoHome fail in 0.6.4.
+        s.char_fail = os.environ.get("FAKE_CHAR_FAIL") == "1"
         s.lock = threading.Lock()
 
     def cmd(s, c):
         c = c[1:-1]
         if c == "GX":
-            state = "Tracking" if s.tracking else "Idle"
+            state = "Homing" if s.home_ra == "IN PROGRESS" else ("Tracking" if s.tracking else "Idle")
             motion = "--T--" if s.tracking else "-----"
             return f"{state},{motion},{s.ra},{s.dec},{s.trk},071906,+900000,#"
         if c == "SHP":
@@ -92,7 +95,15 @@ class Mount:
         if c.startswith("XSHR"): s.xshr = int(c[4:]); return ""
         if c == "hF": s.ra = 0; s.dec = 0; return ""                          # firmware: no reply
         if c.startswith("Q"): s.tracking = False; return ""
-        if c.startswith("MHR") or c.startswith("MHD"): return "1"             # "1" if the search started
+        if c.startswith("MHR"):
+            s.home_ra = "IN PROGRESS"; s.home_polls = 3; return "1"          # "1" if the search started
+        if c.startswith("MHD"): return "1"
+        if c == "XGAH":
+            if s.home_ra == "IN PROGRESS":
+                s.home_polls -= 1
+                if s.home_polls <= 0:
+                    s.home_ra = "SUCCEEDED"; s.ra = 0; s.dec = 0
+            return f"{s.home_ra or 'NOT INITIALIZED'}|NOT INITIALIZED#"
         if c.startswith("XGC"):
             body = c[3:]
             ra_h, dec_d = body.split("*")

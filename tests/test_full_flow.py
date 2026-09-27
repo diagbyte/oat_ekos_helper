@@ -90,7 +90,7 @@ problems += step("unpark", w.unpark_mount, 1.5)
 problems += step("park", w.park_mount, 5.0)
 problems += step("shutdown position", lambda: (w.release_dec.setValue(-30.0), w.move_to_release_position()), 8.0)
 # simulate a power cycle: the firmware zeroes the axes wherever they stand
-problems += step("simulated power cycle", lambda: (w.indi.meade("&SHP#"),
+problems += step("simulated power cycle", lambda: (w.indi.meade("@SHP#"),
                                                    setattr(w, "dec_zero_shift", 0),
                                                    setattr(w, "dec_odometer_valid", True)), 2.0)
 problems += step("restore saved DEC Home", lambda: w.restore_saved_dec_home(confirm=False), 8.0)

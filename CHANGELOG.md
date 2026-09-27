@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.5
+
+- **AutoHome stopped working in 0.6.4 ("No reply byte for &MHRR30#").** 0.6.4
+  sent every one-character command (`:MHR`, `:MX`, `:SHL` ...) as `&`, so the
+  driver read the answer with `getCommandChar()`. On some Raspberry Pi INDI
+  builds that read fails for every `&` command - the same failure behind
+  "Tracking ON request -> �" and the reason AutoHome had been sent blind
+  before. One-character commands, including tracking, Unpark, SET HOME and
+  the AutoPA home/zero, are sent blind (`@`) again; their effect is checked
+  with `:GX#`/`:XGAH#`/`:XGAA#`, never with the reply character.
+- **The unread "1" is flushed instead.** `IndiClient` remembers when a blind
+  command left a one-character answer on the wire and, before the next `:`
+  or `&` read, sends the blind no-op `@Z#` so the driver flushes its input.
+  Blind commands in a row need no extra flush. Typed commands follow the
+  same rule (`:MT1#` goes out as `@MT1#`; type `&` explicitly to read it).
+- SET HOME tries `@SHP#` first and falls back to `:SHP#`, verified by `:GX#`.
+- Tests: the fake mount models RA AutoHome (`:MHR`, `:XGAH#`, GX "Homing")
+  and `FAKE_CHAR_FAIL=1` starts it with every `&` read failing, as on the
+  affected Pi. `tests/test_autohome_blind.py` runs AutoHome in both modes;
+  the whole suite passes in both, with no "No reply byte" line and no read
+  that carries a stale byte (`WIRE_LOG`).
+
 ## 0.6.4
 
 - **Replies were read one command late.** The firmware answers `:MX`, `:MH`,

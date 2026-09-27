@@ -41,11 +41,19 @@ def buttons(widget):
 
 pump(3.0)
 
-# ---- 1. no helper command leaves a byte on the wire -------------------------
+# ---- 1. one-character commands are sent blind, and nothing is left behind --
+# (0.6.4 sent them as '&'; on some Raspberry Pi builds every '&' read fails,
+# which broke AutoHome. 0.6.5 sends them blind and flushes before the next read.)
+import re as _re
 src = Path(oat_helper.__file__).read_text(encoding="utf-8")
-for cmd in ("@SG", "@SL", "@St", "@SHL", "@Sg", "@MXr", "@MXd", "@MHR", "@MHD"):
-    assert f'"{cmd}' not in src and f"'{cmd}" not in src, f"{cmd} is still sent blind"
-print("one-character commands are sent as '&': OK")
+assert not _re.search(r"""meade(?:_async)?\(\s*f?["']&""", src), "the helper must not rely on '&' reads"
+w.indi.meade("@SHL065722#")                 # firmware answers "1", the driver never reads it
+date = w.indi.meade(":GC#")
+print("read after a blind one-char command:", repr(date))
+assert date.count("/") == 2 and len(date.rstrip("#")) == 8, "the unread '1' was glued to the next reply"
+w.indi.meade("@MXr0#"); w.indi.meade("@MXd0#")
+assert w.indi.meade(":XGDL#").startswith("30.0|"), "two blind one-char commands must not shift the channel"
+print("blind one-char commands leave the channel clean: OK")
 
 # :SC# answers twice; after the resync the next read must be ITS OWN reply.
 assert w.indi.meade(":SC01/01/20#").startswith("1Updating")
@@ -58,9 +66,9 @@ assert w.indi.meade(":XGR#").rstrip("#").replace(".", "", 1).isdigit()
 # ---- 2. prefix routing for typed commands -----------------------------------
 norm = w._normalize_command
 cases = {":hF#": "@hF#", "hP": "@hP#", ":Q#": "@Q#", ":XSR1258.6#": "@XSR1258.6#",
-         ":MT1#": "&MT1#", "MXr100": "&MXr100#", ":SHP#": "&SHP#", ":SG-09#": "&SG-09#",
+         ":MT1#": "@MT1#", "MXr100": "@MXr100#", ":SHP#": "@SHP#", ":SG-09#": "@SG-09#",
          ":SC09/27/26#": ":SC09/27/26#", ":GX#": ":GX#", "XGR": ":XGR#", ":XFR#": ":XFR#",
-         "@GVN#": "@GVN#", "&GX#": "&GX#", ":Mgw0500#": "@Mgw0500#", ":RS#": "@RS#"}
+         "@GVN#": "@GVN#", "&GX#": "&GX#", "&MT1#": "&MT1#", ":Mgw0500#": "@Mgw0500#", ":RS#": "@RS#"}
 for typed, want in cases.items():
     got = norm(typed)
     assert got == want, (typed, got, want)
@@ -80,10 +88,10 @@ def try_limit(which):
 
 
 assert try_limit("L") == [] and try_limit("U") == [], "a limit at Home(0) must be refused"
-real_meade("&MXd-3142#")                                  # DEC to the 'down' side
+real_meade("@MXd-3142#")                                  # DEC to the 'down' side
 assert try_limit("U") == [], "an 'up' limit on the 'down' side must be refused"
 assert try_limit("L") == ["@XSDLL#"], "a 'down' limit on the 'down' side must be sent"
-real_meade("&MXd6284#")                                   # now on the 'up' side
+real_meade("@MXd6284#")                                   # now on the 'up' side
 assert try_limit("L") == [] and try_limit("U") == ["@XSDLU#"]
 w.indi.meade = real_meade
 print("DEC limit here: wrong side / Home refused, right side sent: OK")
