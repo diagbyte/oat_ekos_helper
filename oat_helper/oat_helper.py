@@ -52,7 +52,7 @@ from xml.sax.saxutils import escape
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "OAT Helper"
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 DEFAULT_DEVICE = "LX200 OpenAstroTech"
 CONFIG_DIR = Path.home() / ".config" / "oat-helper"
 DATA_DIR = Path.home() / ".local" / "share" / "oat-helper"
@@ -2091,10 +2091,10 @@ class OATHelper(QtWidgets.QMainWindow):
         set_low = QtWidgets.QPushButton("Set lower limit here"); set_low.clicked.connect(lambda: self.set_dec_limit_here("L"))
         set_up = QtWidgets.QPushButton("Set upper limit here"); set_up.clicked.connect(lambda: self.set_dec_limit_here("U"))
         clr = QtWidgets.QPushButton("Reset to configuration values"); clr.clicked.connect(self.clear_dec_limits)
-        self.dec_limit_travel_down = QtWidgets.QDoubleSpinBox(); self.dec_limit_travel_down.setRange(0, 180)
-        self.dec_limit_travel_down.setDecimals(1); self.dec_limit_travel_down.setSuffix("°"); self.dec_limit_travel_down.setValue(90.0)
-        self.dec_limit_travel_up = QtWidgets.QDoubleSpinBox(); self.dec_limit_travel_up.setRange(0, 180)
-        self.dec_limit_travel_up.setDecimals(1); self.dec_limit_travel_up.setSuffix("°"); self.dec_limit_travel_up.setValue(90.0)
+        self.dec_limit_travel_down = QtWidgets.QDoubleSpinBox(); self.dec_limit_travel_down.setRange(1, 180)
+        self.dec_limit_travel_down.setDecimals(1); self.dec_limit_travel_down.setSuffix("°"); self.dec_limit_travel_down.setValue(135.0)
+        self.dec_limit_travel_up = QtWidgets.QDoubleSpinBox(); self.dec_limit_travel_up.setRange(1, 180)
+        self.dec_limit_travel_up.setDecimals(1); self.dec_limit_travel_up.setSuffix("°"); self.dec_limit_travel_up.setValue(135.0)
         apply_lim = QtWidgets.QPushButton("Apply travel limits"); apply_lim.setObjectName("primary")
         apply_lim.clicked.connect(self.apply_dec_limits)
         fl.addWidget(self.dec_fw_limit_label,0,0,1,3); fl.addWidget(read_lim,0,3)
@@ -2102,9 +2102,10 @@ class OATHelper(QtWidgets.QMainWindow):
         fl.addWidget(QtWidgets.QLabel("up"),1,2); fl.addWidget(self.dec_limit_travel_up,1,3)
         fl.addWidget(apply_lim,2,0,1,4)
         fl.addWidget(set_low,3,0); fl.addWidget(set_up,3,1); fl.addWidget(clr,3,2)
-        fl.addWidget(self._hint("The firmware stores how far the DEC ring may travel from Home, downwards and upwards, "
-                                "and clamps every move - including GOTO - to that range. With Home at the pole, a "
-                                "'down' limit of 30° means no target below DEC +60° can be reached. 90/90 allows full travel."),4,0,1,4)
+        fl.addWidget(self._hint("The firmware stores how far the DEC ring may travel from Home in each direction and clamps "
+                                "every move - including GOTO - to that range. With Home at the pole BOTH directions lower "
+                                "the declination (one per side of the meridian): 90° reaches DEC 0°, 120° reaches DEC -30°, "
+                                "135° reaches DEC -45°. Never enter 0 - the firmware then stores the current position instead."),4,0,1,4)
         v.addWidget(fw)
 
         tgt = QtWidgets.QGroupBox("Target reachability check (:XGC#)")
@@ -2264,8 +2265,8 @@ class OATHelper(QtWidgets.QMainWindow):
                     text = _("Firmware DEC limits: not set")
                 else:
                     text = _("Firmware DEC travel: {down:.1f}° down / {up:.1f}° up "
-                             "(DEC {low:+.1f}° … {high:+.1f}° with Home at the pole)").format(
-                        down=down, up=up, low=90.0 - down, high=min(90.0, 90.0 + up))
+                             "(lowest DEC {low_down:+.1f}° / {low_up:+.1f}° with Home at the pole)").format(
+                        down=down, up=up, low_down=90.0 - down, low_up=90.0 - up)
                 self.dec_fw_limit_label.setText(text)
             if hasattr(self, "dec_limit_travel_down") and (down or up):
                 self.dec_limit_travel_down.setValue(float(down or 0.0))
@@ -2287,11 +2288,19 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log("An INDI connection is required.", logging.WARNING); return
         down = float(self.dec_limit_travel_down.value())
         up = float(self.dec_limit_travel_up.value())
+        if down < 1.0 or up < 1.0:
+            # :XSDLL0# / :XSDLU0# do NOT reset the limit (despite the protocol
+            # docs): Mount::setDecLimitPosition() treats 0 as "use the current
+            # position". Use "Reset to configuration values" instead.
+            self.log("A DEC travel of 0° would pin the limit to the current position. "
+                     "Use 'Reset to configuration values' to clear it.", logging.WARNING)
+            return
         if QtWidgets.QMessageBox.question(
                 self, _("Set DEC limit"),
                 _("Allow the DEC ring to travel {down:.1f}° down and {up:.1f}° up from Home?\n"
-                  "With Home at the pole that is DEC {low:+.1f}° … {high:+.1f}°; every move is clamped to it.").format(
-                    down=down, up=up, low=90.0 - down, high=min(90.0, 90.0 + up)),
+                  "With Home at the pole that reaches DEC {low_down:+.1f}° on one side of the meridian and "
+                  "DEC {low_up:+.1f}° on the other; every move is clamped to it.").format(
+                    down=down, up=up, low_down=90.0 - down, low_up=90.0 - up),
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.Yes) != QtWidgets.QMessageBox.Yes:
             return
@@ -4595,6 +4604,13 @@ class OATHelper(QtWidgets.QMainWindow):
     def _parse_paa_angle(text):
         """Parse either KStars DMS text or legacy decimal degrees."""
         s = str(text).strip().replace("−", "-").replace("＋", "+")
+        # KStars writes the line with qCInfo() << QString, so QDebug wraps the
+        # message in quotes and escapes the seconds sign: 34\" instead of 34".
+        # Without unescaping, the seconds group never matches and every value
+        # is silently truncated to whole arc-minutes (sub-arcminute errors
+        # read as 0 and AutoPA stops early).
+        # (Do not strip quotes afterwards: the trailing " IS the seconds sign.)
+        s = s.replace('\\"', '"').replace("\\'", "'").strip()
         # Legacy decimal-degree logs.
         if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s):
             return float(s)

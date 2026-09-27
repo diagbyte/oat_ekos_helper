@@ -68,6 +68,31 @@ with log.open("a") as fh:
 last = w.latest_ekos_paa()
 print("corrupt line tolerated, latest az′:", round(last[2] * 60, 2))
 
+# Real KStars output: Align::appendLogText() does qCInfo() << QString, so
+# QDebug quotes the message and escapes the seconds sign (34\"). Positive
+# values get a leading space, not '+' (dms::toDMSString, forceSign=false).
+def real_line(n, az, alt, tot):
+    msg = f"PAA Refresh({n}): Corrected az: {az} alt: {alt} total: {tot}"
+    quoted = '"' + msg.replace('"', '\\"') + '"'
+    return (f"[2026-09-18T1:07:0{n}.123 KST INFO ][     org.kde.kstars.ekos.align] - "
+            f"{quoted}\n")
+
+with log.open("a") as fh:
+    fh.write(real_line(5, '-00° 12\' 34"', ' 00° 03\' 21"', ' 00° 13\' 00"'))
+real = w.latest_ekos_paa()
+print("quoted KStars line az′/alt′:", round(real[2] * 60, 3), round(real[3] * 60, 3))
+assert abs(real[2] * 60 - (-12.567)) < 0.01, real[2] * 60
+assert abs(real[3] * 60 - 3.35) < 0.01, real[3] * 60
+
+# Sub-arcminute residuals must not collapse to 0 (the old parser read these
+# as 0/0 and declared AutoPA finished).
+with log.open("a") as fh:
+    fh.write(real_line(6, '-00° 00\' 30"', '-00° 00\' 10"', ' 00° 00\' 32"'))
+small = w.latest_ekos_paa()
+print("sub-arcminute az″/alt″:", round(small[2] * 3600, 1), round(small[3] * 3600, 1))
+assert abs(small[2] * 3600 - (-30.0)) < 0.5, small[2] * 3600
+assert abs(small[3] * 3600 - (-10.0)) < 0.5, small[3] * 3600
+
 # diagnostics
 w.diagnose_paa_log(); pump(1.5)
 print("--- diagnose output ---")

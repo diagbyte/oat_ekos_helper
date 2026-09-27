@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.2
+
+- **AutoPA read every PAA value truncated to whole arc-minutes.** KStars writes
+  the "PAA Refresh" line through `qCInfo() << QString`, so the file contains
+  `34\"` (QDebug-escaped) instead of `34"`. The parser never matched the
+  seconds, so -12' 34" became -12', and any residual under 1' per axis read
+  as 0 - AutoPA under-corrected every cycle and could report "within target"
+  while more than an arc-minute was left. The escape is now removed before
+  parsing, and `tests/test_paa_log_parsing.py` uses the real quoted format
+  (it failed on 0.6.1).
+- **DEC travel limits defaulted to 90°/90°, which stops GOTO at DEC 0°.** With
+  Home at the pole both DEC directions *lower* the declination (one per side
+  of the meridian), so 90° reaches the equator, 120° DEC -30°, 135° DEC -45°.
+  The hint claimed "90/90 allows full travel" and the dialogs showed an upper
+  bound of +90° + up. Defaults are now 135°/135° (the firmware's OAE/OAM
+  default), the text and dialogs show the lowest DEC on each side, and 0 is
+  refused: despite the protocol docs, `:XSDLL0#`/`:XSDLU0#` make the firmware
+  store the *current position* (`Mount::setDecLimitPosition`), so use
+  "Reset to configuration values" to clear a limit. Since firmware 1.13.16 a
+  DEC limit also blocks DEC guide pulses in that direction.
+
 ## 0.6.1
 
 - **Translation gaps closed.** Text built at runtime never went through the
