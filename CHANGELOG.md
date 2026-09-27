@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.6.4
+
+- **Replies were read one command late.** The firmware answers `:MX`, `:MH`,
+  `:SG`, `:SL`, `:St`, `:Sg` and `:SHL` with a single `1` and no `#`. The
+  helper sent them blind (`@`); `lx200_OpenAstroTech` never reads a blind
+  reply, and neither `getCommandString()` nor `getCommandChar()` flushes
+  before writing, so that `1` was glued to the next answer: the date read as
+  `109/27/26`, the sidereal time as `1063648`, the version as `1V1.13.9`.
+  They are sent as `&` now, so the driver consumes the byte. (The "garbled
+  byte" that once made `&` look unreliable for AutoHome and jogs was the ARM
+  0xFF read failure handled in 0.6.3.)
+- **`_resync_meade()` reported success while the channel stayed shifted.**
+  After `:SC#` (two replies) each read consumed one stale reply and left its
+  own behind, so the "version" it recognised was the previous `:GVN#` answer
+  and the next read (e.g. `:XGDL#`) returned the version. It now starts with
+  a blind no-op (`@Z#`: the driver flushes its input before a blind write,
+  and the firmware ignores the unknown `:Z` family) and then verifies.
+- **Typed Meade commands pick the right prefix.** `:hF#`, `:Q#`, `:XS...`
+  and other commands the firmware does not answer are sent as `@` (a `:`
+  made the driver wait for its timeout while holding the serial port);
+  one-character answers (`MT`, `MX`, `SHP`, `S...` except `SC`) as `&`. An
+  explicit `@`/`&` is kept.
+- **DEC "limit here" refuses positions that would break the limit.** The
+  firmware stores the *signed* current step position (and its absolute value
+  in EEPROM). Pinned on the wrong side of Home it blocked the way back to Home
+  and DEC guide pulses and changed meaning after a reboot; at Home(0) it
+  cleared the limit. The buttons are now "Set 'down' / 'up' limit here" and
+  only act on that side of Home.
+- **Diag tab restored.** `make_diag_tab()` was defined twice; the second
+  definition replaced the first, so "Refresh OAT status" (the read-only
+  mount report) and "Open the log folder" never appeared. They are back, the
+  one-click "Set Home" (`:SHP#`, no confirmation) and the duplicate "Go Home"
+  (`:hF#` sent with `:`) quick buttons are gone, and "DEC limits" (`:XGDL#`)
+  was added.
+- **Factory reset** always sends `:XFR#`, the firmware's only reset command;
+  the editable, saved command field is now read-only.
+- **Button clean-up.** The Mini Controller had two HOME buttons calling the
+  same function; the centre key stays, with the correct tooltip, and the note
+  no longer refers to the DEC inversion option removed in 0.6.0. The firmware
+  tab's four refresh/check buttons are two ("Refresh" also refreshes the
+  version panel, "Check for updates" also checks the latest release). The
+  wizard's "Wait for auto correction" starts AutoPA and is now called "Start
+  auto correction".
+- `tests/fake_indi_server.py` models the driver's serial handling (bytes left
+  by blind commands, `:SC#`'s second reply, unflushed reads) and the
+  firmware's real replies (`:XSR`/`:XSD`/`:hF` answer nothing). With it the
+  0.6.3 code shows the shifted reads; `tests/test_064_cleanup.py` covers the
+  changes above. `WIRE_LOG=/tmp/wire.log` traces every transaction.
+
 ## 0.6.3
 
 - **"Tracking ON request -> �" on a Raspberry Pi.** The garbled character

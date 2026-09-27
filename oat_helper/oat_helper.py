@@ -52,7 +52,12 @@ from xml.sax.saxutils import escape
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "OAT Helper"
-VERSION = "0.6.3"
+VERSION = "0.6.4"
+# The firmware's only factory reset: clears the whole EEPROM (MeadeProtocol :XFR#).
+FACTORY_RESET_COMMAND = ":XFR#"
+# Blind no-op: the driver flushes its input before a blind write, and the
+# firmware ignores the unknown :Z family without replying.
+MEADE_FLUSH_NOOP = "@Z#"
 DEFAULT_DEVICE = "LX200 OpenAstroTech"
 CONFIG_DIR = Path.home() / ".config" / "oat-helper"
 DATA_DIR = Path.home() / ".local" / "share" / "oat-helper"
@@ -963,7 +968,6 @@ class OATHelper(QtWidgets.QMainWindow):
             # Firmware maintenance (only usable on the machine holding the USB cable)
             "firmware_source_dir": "", "firmware_env": "mksgenlv21", "firmware_port": "/dev/ttyACM0",
             "firmware_ref": "develop", "firmware_last_fetch": "", "latest_release_tag": "",
-            "factory_reset_command": ":XFR#",
             "expected_ra_spr": 400, "expected_dec_spr": 400, "expected_az_spr": 200,
             "expected_alt_spr": 200, "expected_autopa_version": 2,
             "custom_commands": [{"name": f"Custom {i}", "command": ""} for i in range(1, 5)],
@@ -1058,7 +1062,6 @@ class OATHelper(QtWidgets.QMainWindow):
                 "firmware_source_dir": self.fw_source.text().strip(),
                 "firmware_env": self.fw_env.currentText().strip(),
                 "firmware_port": self.fw_port.text().strip(),
-                "factory_reset_command": self.factory_cmd.text().strip(),
                 "expected_ra_spr": self.expected_ra_spr.value(),
                 "expected_dec_spr": self.expected_dec_spr.value(),
                 "expected_az_spr": self.expected_az_spr.value(),
@@ -1413,7 +1416,7 @@ class OATHelper(QtWidgets.QMainWindow):
         b_dec = QtWidgets.QPushButton("Home fine adjustment / SET HOME")
         b_dec.setObjectName("primary")
         b_paa_help = QtWidgets.QPushButton("View PAA guide")
-        b_paa_wait = QtWidgets.QPushButton("Wait for auto correction")
+        b_paa_wait = QtWidgets.QPushButton("Start auto correction")
 
         b_conn.clicked.connect(self.wizard_connect)
         b_ra.clicked.connect(self.wizard_start_ra)
@@ -1435,7 +1438,7 @@ class OATHelper(QtWidgets.QMainWindow):
         g.addWidget(QtWidgets.QLabel("⑤ Ready"),4,0); g.addWidget(self.wiz_ready_status,4,1,1,3)
 
         paa_hint = self._hint(
-            "View PAA guide -> Wait for auto correction -> Slew to a southern star field -> In the Ekos Align Polar Alignment Assistant, "
+            "View PAA guide -> Start auto correction -> Slew to a southern star field -> In the Ekos Align Polar Alignment Assistant, "
             "measure with Auto Slew ON, then start Refresh. When a new Refresh result arrives, ALT/AZ are corrected automatically. "
             "Only the RA/DEC and AutoPA motors move here; do not touch the base.")
         g.addWidget(paa_hint,5,0,1,4)
@@ -1622,7 +1625,7 @@ class OATHelper(QtWidgets.QMainWindow):
             "4) Open Ekos > Align > Polar Alignment Assistant. You do not need to see the pole. "
             "Turn Auto Slew on and start with a rotation of about 20°. For East/West, pick the side that is not blocked by a window frame or wall during the two RA rotations.\n\n"
             "5) Once the PAA measurement starts, Ekos rotates the RA axis twice and plate-solves three frames.\n\n"
-            "6) Start Refresh in the PAA correction screen. If you already pressed [Wait for auto correction] in OAT Tools, "
+            "6) Start Refresh in the PAA correction screen. If you already pressed [Start auto correction] in OAT Tools, "
             "reads the new Refresh result and moves AutoPA ALT/AZ automatically.\n\n"
             "7) When a new Refresh result is at or below the target accuracy, OAT Tools shows Ready.")
         QtWidgets.QMessageBox.information(self, _("Starting the Ekos PAA"), text)
@@ -2020,25 +2023,18 @@ class OATHelper(QtWidgets.QMainWindow):
         home = QtWidgets.QPushButton("HOME")
         home.setMinimumSize(58, 44)
         home.setStyleSheet("font-size: 12px; font-weight: 700;")
-        home.setToolTip(_("Move to RA logical Home(0) + the saved DEC manual Home position"))
+        home.setToolTip(_("Firmware Go To Home (:hF#) - return to the RA/DEC logical 0 fixed by the final SET HOME"))
         home.clicked.connect(self.mini_goto_home)
         pad.addWidget(home, 1, 1)
 
         pad_wrap = QtWidgets.QWidget(); pad_wrap.setLayout(pad)
         g.addWidget(pad_wrap, 1, 0, 1, 4, QtCore.Qt.AlignHCenter)
 
-        # Explicit field button beside the compact centre HOME key.
-        go_home = QtWidgets.QPushButton("GO HOME — RA / DEC")
-        go_home.setMinimumHeight(34)
-        go_home.setObjectName("primary")
-        go_home.setToolTip(_("Firmware Go To Home (:hF#) - return to the RA/DEC logical 0 fixed by the final SET HOME"))
-        go_home.clicked.connect(self.mini_goto_home)
-        g.addWidget(go_home, 2, 0, 1, 4)
 
         note = self._hint(
             "HOME uses firmware :hF# to move to the logical Home(0) fixed by the final SET HOME. "
-            "The DEC up/down inversion follows the option on the Home tab.")
-        g.addWidget(note, 3, 0, 1, 4)
+            "Axis directions come from the firmware configuration (RA/DEC_INVERT_DIR).")
+        g.addWidget(note, 2, 0, 1, 4)
         v.addWidget(box)
 
         pa = QtWidgets.QGroupBox("AutoPA fine movement")
@@ -2107,8 +2103,8 @@ class OATHelper(QtWidgets.QMainWindow):
         fl = QtWidgets.QGridLayout(fw)
         self.dec_fw_limit_label = QtWidgets.QLabel("Firmware DEC limits: not checked")
         read_lim = QtWidgets.QPushButton("Read"); read_lim.clicked.connect(self.read_dec_limits)
-        set_low = QtWidgets.QPushButton("Set lower limit here"); set_low.clicked.connect(lambda: self.set_dec_limit_here("L"))
-        set_up = QtWidgets.QPushButton("Set upper limit here"); set_up.clicked.connect(lambda: self.set_dec_limit_here("U"))
+        set_low = QtWidgets.QPushButton("Set 'down' limit here"); set_low.clicked.connect(lambda: self.set_dec_limit_here("L"))
+        set_up = QtWidgets.QPushButton("Set 'up' limit here"); set_up.clicked.connect(lambda: self.set_dec_limit_here("U"))
         clr = QtWidgets.QPushButton("Reset to configuration values"); clr.clicked.connect(self.clear_dec_limits)
         self.dec_limit_travel_down = QtWidgets.QDoubleSpinBox(); self.dec_limit_travel_down.setRange(1, 180)
         self.dec_limit_travel_down.setDecimals(1); self.dec_limit_travel_down.setSuffix("°"); self.dec_limit_travel_down.setValue(135.0)
@@ -2174,18 +2170,6 @@ class OATHelper(QtWidgets.QMainWindow):
         v.addWidget(drift)
         back=QtWidgets.QLabel("For a precise check, measure both directions with +D, -2D, +D and compare the backlash difference. This version records each run so you can repeat and compare.")
         back.setWordWrap(True); v.addWidget(back); v.addStretch(1); return w
-
-
-    def make_diag_tab(self):
-        w=QtWidgets.QWidget(); v=QtWidgets.QVBoxLayout(w)
-        note=QtWidgets.QLabel("Read-only diagnostics that are safe to use while observing. Arbitrary Meade commands, EEPROM/Factory Reset and firmware configuration/flashing live in the separate OAT Firmware extension.")
-        note.setWordWrap(True); v.addWidget(note)
-        row=QtWidgets.QHBoxLayout(); b=QtWidgets.QPushButton("Refresh OAT status"); b.setObjectName("primary"); b.clicked.connect(self.refresh_diagnostics)
-        logs=QtWidgets.QPushButton("Open the log folder"); logs.clicked.connect(lambda: os.system(f'xdg-open "{LOG_DIR}" >/dev/null 2>&1 &'))
-        row.addWidget(b); row.addWidget(logs); row.addStretch(1); v.addLayout(row)
-        self.diag_text=QtWidgets.QPlainTextEdit(); self.diag_text.setReadOnly(True); self.diag_text.setMinimumHeight(160)
-        self.diag_text.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)); v.addWidget(self.diag_text,1)
-        return w
 
 
     # ------------------------ async helpers ------------------------
@@ -2340,7 +2324,7 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log("An INDI connection is required.", logging.WARNING); return
         if self._motion_or_home_busy():
             self.log("Set the limits after the move has finished.", logging.WARNING); return
-        label = "Lower" if which == "L" else "Upper"
+        label = "'down'" if which == "L" else "'up'"
         if QtWidgets.QMessageBox.question(
                 self, _("Set DEC limit"),
                 f"The current DEC position as the firmware DEC {label} limit.\n"
@@ -2351,7 +2335,22 @@ class OATHelper(QtWidgets.QMainWindow):
         def job():
             gx = self._parse_gx(self.indi.meade(":GX#"))
             spd = self._read_dec_steps_per_degree()
-            deg = float(gx["dec_steps"]) / spd if spd else 0.0
+            steps = int(gx["dec_steps"])
+            deg = float(steps) / spd if spd else 0.0
+            # Mount::setDecLimitPosition() stores the *signed* current position
+            # (and fabs() of it in EEPROM, re-read as a down/up distance on the
+            # next boot). Pinned on the wrong side of Home it would block the
+            # way back to Home and DEC guide pulses; at Home(0) it clears the
+            # limit instead of setting one.
+            if steps == 0:
+                raise ValueError("DEC is at Home(0). A limit set here would clear the limit instead - "
+                                 "move DEC to where the limit should be first.")
+            side = "down" if steps < 0 else "up"
+            wanted = "down" if which == "L" else "up"
+            if side != wanted:
+                raise ValueError(f"DEC is on the '{side}' side of Home ({deg:+.2f}°). A '{wanted}' limit can only "
+                                 f"be set on the '{wanted}' side: the firmware stores the signed position, so here it "
+                                 "would block the way back to Home and change meaning after a reboot.")
             # No parameter => firmware uses the current position.
             self.indi.meade("@XSDLL#" if which == "L" else "@XSDLU#")
             time.sleep(0.25)
@@ -2581,7 +2580,7 @@ class OATHelper(QtWidgets.QMainWindow):
             dec_steps = self._dec_steps_for_degrees(dec_deg, dec_spd)
             moved_dec = 0
             if dec_steps:
-                self.indi.meade(f"@MXd{dec_steps}#")
+                self.indi.meade(f"&MXd{dec_steps}#")
                 end = self._wait_for_dec_idle(timeout=180.0)
                 moved_dec = int(end["dec_steps"]) - int(start["dec_steps"])
                 if abs(moved_dec - dec_steps) > max(4, abs(dec_steps) // 100):
@@ -2592,7 +2591,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 ra_spd = self._read_ra_steps_per_degree()
                 ra_steps = self._ra_steps_for_degrees(ra_deg, ra_spd)
                 if ra_steps:
-                    self.indi.meade(f"@MXr{ra_steps}#")
+                    self.indi.meade(f"&MXr{ra_steps}#")
                     self._wait_for_ra_dec_idle(wait_ra=True, timeout=180.0)
             return started_at_home, moved_dec
 
@@ -2824,16 +2823,28 @@ class OATHelper(QtWidgets.QMainWindow):
 
 
     def _resync_meade(self, attempts=6):
-        """Realign the Meade channel after a command that answers twice.
+        """Realign the Meade channel after a command that left bytes behind.
 
         :SC# (set date) replies with TWO '#'-terminated strings
         ("1Updating Planetary Data#" and 30 spaces + "#"). The passthrough
         reads one, so the spare reply shifts every later read by one - a date
         comes back as "109/19/26", the sidereal time reads as garbage, and the
-        repair appears to do nothing. :GVN# is a safe anchor: its answer is
-        recognisable, so reading until it looks like a version drains the
-        leftovers.
+        repair appears to do nothing. The same happened after any
+        one-character command sent blind ('@'): the driver never reads its
+        "1", and neither getCommandString() nor getCommandChar() flushes before
+        writing. Those are sent as '&' now. :GVN# is a safe anchor: its answer
+        is recognisable, but reading alone cannot catch up: every read that
+        consumes a stale reply leaves its own answer behind, so the channel
+        stayed one reply behind until some later blind command happened to
+        flush it. A blind no-op does that on purpose: '@' makes the driver
+        flush the input before writing, and ':Z#' is a command family the
+        firmware ignores without answering. The :GVN# reads then confirm it.
         """
+        try:
+            self.indi.meade(MEADE_FLUSH_NOOP)
+            time.sleep(0.15)
+        except Exception:
+            pass
         for _ in range(attempts):
             try:
                 reply = str(self.indi.meade(":GVN#")).strip().rstrip("#")
@@ -2863,7 +2874,7 @@ class OATHelper(QtWidgets.QMainWindow):
         now_local = datetime.now()
         # :SGsHH# is the Meade convention (hours to add to local time to get
         # UTC), so it is the negated site offset.
-        self.indi.meade(f"@SG{-offset_hours:+03.0f}#")
+        self.indi.meade(f"&SG{-offset_hours:+03.0f}#")
         time.sleep(0.2)
         wanted_date = now_local.strftime("%m/%d/%y")
         current_date = str(self.indi.meade(":GC#")).strip().rstrip("#")
@@ -2874,10 +2885,10 @@ class OATHelper(QtWidgets.QMainWindow):
             self._resync_meade()
         else:
             self.logger.debug("Mount date already %s, not rewriting it", current_date)
-        self.indi.meade(f"@SL{now_local.strftime('%H:%M:%S')}#")
+        self.indi.meade(f"&SL{now_local.strftime('%H:%M:%S')}#")
         time.sleep(0.2)
         lat_deg = int(abs(lat)); lat_min = int(round((abs(lat) - lat_deg) * 60))
-        self.indi.meade(f"@St{'+' if lat >= 0 else '-'}{lat_deg:02d}*{lat_min:02d}#")
+        self.indi.meade(f"&St{'+' if lat >= 0 else '-'}{lat_deg:02d}*{lat_min:02d}#")
         time.sleep(0.2)
         # Signed longitudes are "negative going east" in this firmware.
         stored = self.cfg.get("longitude_command")
@@ -2893,7 +2904,7 @@ class OATHelper(QtWidgets.QMainWindow):
             seconds, minutes = 0, minutes + 1
         if minutes == 60:
             minutes, hours = 0, (hours + 1) % 24
-        self.indi.meade(f"@SHL{hours:02d}{minutes:02d}{seconds:02d}#")
+        self.indi.meade(f"&SHL{hours:02d}{minutes:02d}{seconds:02d}#")
         time.sleep(0.3)
         return self._mount_clock_snapshot()
 
@@ -2917,9 +2928,9 @@ class OATHelper(QtWidgets.QMainWindow):
             if minutes == 60:
                 minutes, degrees = 0, degrees + 1
             if label.startswith("signed"):
-                candidates.append((label, f"@Sg{'-' if value < 0 else '+'}{degrees:03d}*{minutes:02d}#"))
+                candidates.append((label, f"&Sg{'-' if value < 0 else '+'}{degrees:03d}*{minutes:02d}#"))
             else:
-                candidates.append((label, f"@Sg{degrees:03d}*{minutes:02d}#"))
+                candidates.append((label, f"&Sg{degrees:03d}*{minutes:02d}#"))
         return candidates
 
     def _calibrate_longitude(self, lon_east, computed_lst):
@@ -2969,7 +2980,7 @@ class OATHelper(QtWidgets.QMainWindow):
                     hours = int(computed)
                     minutes = int((computed - hours) * 60)
                     seconds = int(round((computed - hours - minutes / 60.0) * 3600))
-                    self.indi.meade(f"@SHL{hours:02d}{minutes:02d}{seconds:02d}#")
+                    self.indi.meade(f"&SHL{hours:02d}{minutes:02d}{seconds:02d}#")
                     time.sleep(0.3)
                 after = self._mount_clock_snapshot()
             return before, after, computed, fixed_by
@@ -3111,9 +3122,9 @@ class OATHelper(QtWidgets.QMainWindow):
             # Existing firmware-native relative jog commands only; no new
             # command and no :Q# are introduced here.
             if ra_steps:
-                self.indi.meade(f"@MXr{ra_steps}#")
+                self.indi.meade(f"&MXr{ra_steps}#")
             if dec_motor_steps:
-                self.indi.meade(f"@MXd{dec_motor_steps}#")
+                self.indi.meade(f"&MXd{dec_motor_steps}#")
 
             gx_end = self._wait_for_ra_dec_idle(
                 wait_ra=bool(ra_steps), wait_dec=bool(dec_motor_steps), timeout=90.0)
@@ -3405,7 +3416,7 @@ class OATHelper(QtWidgets.QMainWindow):
             if minutes == 60:
                 minutes = 0
                 hours = (hours + 1) % 24
-            self.indi.meade(f"@SHL{hours:02d}{minutes:02d}{seconds:02d}#")
+            self.indi.meade(f"&SHL{hours:02d}{minutes:02d}{seconds:02d}#")
             time.sleep(0.3)
             mount_lst = self._read_mount_lst()
             mount_date = str(self.indi.meade(":GC#")).strip().rstrip("#")
@@ -3778,7 +3789,7 @@ class OATHelper(QtWidgets.QMainWindow):
             if motor_steps == 0:
                 raise RuntimeError(f"DEC {user_degrees:+g}° converts to 0 step (XGD={spd})")
             gx_start = self._parse_gx(self.indi.meade(":GX#"))
-            self.indi.meade(f"@MXd{motor_steps}#")
+            self.indi.meade(f"&MXd{motor_steps}#")
             gx_end = self._wait_for_dec_idle(timeout=90.0)
             return spd, motor_steps, gx_start["dec_steps"], gx_end["dec_steps"]
 
@@ -3845,7 +3856,7 @@ class OATHelper(QtWidgets.QMainWindow):
             if steps == 0:
                 raise RuntimeError(f"RA {user_degrees:+g}° converts to 0 step (XGR={spd})")
             gx_start = self._parse_gx(self.indi.meade(":GX#"))
-            self.indi.meade(f"@MXr{steps}#")
+            self.indi.meade(f"&MXr{steps}#")
             gx_end = self._wait_for_ra_dec_idle(wait_ra=True, timeout=90.0)
             return spd, steps, gx_start, gx_end
 
@@ -4109,7 +4120,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 raise RuntimeError(
                     f"GX DEC={gx0['dec_steps']} ≠ 0: DEC has already moved. Restoring is only possible right after power-on.")
             if move != 0:
-                self.indi.meade(f"@MXd{move}#")
+                self.indi.meade(f"&MXd{move}#")
                 gx1 = self._wait_for_dec_idle(timeout=120.0)
                 moved = int(gx1["dec_steps"])
                 if abs(moved - move) > max(4, abs(move) // 100):
@@ -4160,7 +4171,7 @@ class OATHelper(QtWidgets.QMainWindow):
             current = int(gx_start["dec_steps"])
             delta = -current
             if delta != 0:
-                self.indi.meade(f"@MXd{delta}#")
+                self.indi.meade(f"&MXd{delta}#")
                 gx_end = self._wait_for_dec_idle(timeout=90.0)
             else:
                 gx_end = gx_start
@@ -4210,14 +4221,15 @@ class OATHelper(QtWidgets.QMainWindow):
             self.home_busy = False; self.home_timer.stop(); self.log("AutoHome sequence finished."); self.read_offsets(); return
         axis = self.home_sequence.pop(0)
         rng = max(5, self.home_range.value())
-        # MHR/MHD return a single character with no '#'.  Some Astroberry
-        # libindi builds are unreliable when that reply is routed through the
-        # generic Meade text property.  We do not actually need the character:
-        # send the command blind ('@' => driver transmits ':' command) and use
-        # GX/XGAH to verify progress/result.
-        if axis == "RA": cmd = f"@MHR{self.ra_dir.currentData()}{rng}#"
-        else: cmd = f"@MHD{self.dec_dir.currentData()}{rng}#"
-        self.log(f"Starting {axis} AutoHome (no-reply mode): {cmd[1:]}")
+        # MHR/MHD answer one character ("1" = search started) without '#'.
+        # They are sent as '&' so the driver reads that byte: sent blind ('@')
+        # it stayed in the serial buffer and was glued to the next reply
+        # (a date read as "109/27/26"). The "garbled byte" that once made
+        # '&' look unreliable was the ARM char(-1) -> 0xFF driver bug, which
+        # IndiClient now turns into "no reply". GX/XGAH still verify the result.
+        if axis == "RA": cmd = f"&MHR{self.ra_dir.currentData()}{rng}#"
+        else: cmd = f"&MHD{self.dec_dir.currentData()}{rng}#"
+        self.log(f"Starting {axis} AutoHome: {cmd[1:]}")
         def job():
             # Hall homing ends with firmware setHome(false), which re-zeroes DEC
             # *without moving it*.  Remember where DEC was so the DEC odometer
@@ -4321,7 +4333,6 @@ class OATHelper(QtWidgets.QMainWindow):
         if self.ra_cal_active or self.dec_cal_active or self.home_busy:
             self.log("Finish/cancel the current calibration/home first.", logging.WARNING); return
         get_cmd = ":XGHR#" if axis=="RA" else ":XGHD#"
-        set_zero = "@XSHR0#" if axis=="RA" else "@XSHD0#"
         self.log(f"{axis} offset calibration: backing up current offset, setting 0, then homing to Hall center.")
         def job():
             old = int(float(str(self.indi.meade(get_cmd)).strip().rstrip("#")))
@@ -4342,13 +4353,10 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log("Start the offset calibration first.", logging.WARNING); return
         if self.home_busy:
             self.log("Jog after AutoHome has finished.", logging.WARNING); return
-        # :MXr/:MXd are movement commands and do not provide a reliable
-        # one-character acknowledgement through the LX200 OpenAstroTech
-        # generic Meade property.  0.1.3 incorrectly used '&' (one-char
-        # response mode), which could consume an unrelated/garbled byte even
-        # though the motor move itself had been accepted.  Send blind ('@')
-        # just like XSHR/XSHD and count the jog once INDI accepts the command.
-        cmd = f"@MXr{steps}#" if axis=="RA" else f"@MXd{steps}#"
+        # :MXr/:MXd answer "1" without '#'. Sent as '&' so the driver reads
+        # that byte; blind ('@') it stayed on the wire and shifted the next
+        # reply (see _resync_meade). The jog is counted once it is accepted.
+        cmd = f"&MXr{steps}#" if axis=="RA" else f"&MXd{steps}#"
         def done(_result):
             if axis=="RA":
                 self.ra_cal_jog += steps
@@ -4358,7 +4366,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 self.dec_cal_jog += steps
                 total = self.dec_cal_jog
                 self.dec_cal_label.setText(f"DEC: total jog {total:+d} step")
-            self.log(f"{axis} jog {steps:+d} step sent (no-reply), total {total:+d}")
+            self.log(f"{axis} jog {steps:+d} step sent, total {total:+d}")
         self.meade_async(cmd, done)
 
     def finish_offset_cal(self):
@@ -5191,8 +5199,8 @@ class OATHelper(QtWidgets.QMainWindow):
         if not self.axis_start: self.log('Record Start Solve first.',logging.WARNING); return
         axis=self.axis_sel.currentText(); deg=float(self.axis_move.value()); self.axis_name=axis; self.axis_commanded_deg=deg
         def job():
-            if axis=='RA': spd=self._read_ra_steps_per_degree(); self.indi.meade(f'@MXr{int(round(deg*spd))}#')
-            else: spd=self._read_dec_steps_per_degree(); self.indi.meade(f'@MXd{int(round(deg*spd))}#')
+            if axis=='RA': spd=self._read_ra_steps_per_degree(); self.indi.meade(f'&MXr{int(round(deg*spd))}#')
+            else: spd=self._read_dec_steps_per_degree(); self.indi.meade(f'&MXd{int(round(deg*spd))}#')
             self._wait_for_ra_dec_idle(wait_ra=axis=='RA',wait_dec=axis=='DEC',timeout=180); return spd
         self.run_async(job,lambda spd:self.log(f'{axis} {deg:+.3f}° move complete (steps/deg={spd:.6f}). Run Capture & Solve then Sync in Ekos and record End Solve.'))
 
@@ -5271,10 +5279,16 @@ class OATHelper(QtWidgets.QMainWindow):
 
     def make_diag_tab(self):
         w=QtWidgets.QWidget(); v=QtWidgets.QVBoxLayout(w)
+        # (This used to be defined twice; the second definition silently replaced
+        # the first, so 'Refresh OAT status' and the log folder never showed up.)
+        top=QtWidgets.QHBoxLayout(); b=QtWidgets.QPushButton("Refresh OAT status"); b.setObjectName("primary"); b.clicked.connect(self.refresh_diagnostics)
+        b.setToolTip("Reads firmware, steps/degree, limits, clock and site from the mount without changing anything.")
+        logs=QtWidgets.QPushButton("Open the log folder"); logs.clicked.connect(lambda: os.system(f'xdg-open "{LOG_DIR}" >/dev/null 2>&1 &'))
+        top.addWidget(b); top.addWidget(logs); top.addStretch(1); v.addLayout(top)
         note=QtWidgets.QLabel("Advanced maintenance commands. Use write/EEPROM commands only when you have confirmed them in the firmware documentation."); note.setWordWrap(True); v.addWidget(note)
         row=QtWidgets.QHBoxLayout(); self.command_edit=QtWidgets.QLineEdit(":GX#"); send=QtWidgets.QPushButton("SEND"); send.clicked.connect(self.send_custom_command); row.addWidget(QtWidgets.QLabel("Meade command")); row.addWidget(self.command_edit,1); row.addWidget(send); v.addLayout(row)
         common=QtWidgets.QGroupBox("Frequently used commands"); cg=QtWidgets.QGridLayout(common)
-        cmds=[("GX Status",":GX#"),("Product",":GVP#"),("Firmware",":GVN#"),("RA steps/°",":XGR#"),("DEC steps/°",":XGD#"),("AZ|ALT pos",":XGAA#"),("AutoHome",":XGAH#"),("RA Home offset",":XGHR#"),("Safe tracking",":XGST#"),("Go Home",":hF#"),("Set Home",":SHP#")]
+        cmds=[("GX Status",":GX#"),("Product",":GVP#"),("Firmware",":GVN#"),("RA steps/°",":XGR#"),("DEC steps/°",":XGD#"),("AZ|ALT pos",":XGAA#"),("AutoHome",":XGAH#"),("RA Home offset",":XGHR#"),("Safe tracking",":XGST#"),("DEC limits",":XGDL#")]
         for i,(name,cmd) in enumerate(cmds):
             b=QtWidgets.QPushButton(name); b.clicked.connect(lambda _=False,c=cmd:self.run_diag_command(c)); cg.addWidget(b,i//4,i%4)
         v.addWidget(common)
@@ -5305,7 +5319,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self.git_install_btn.clicked.connect(self.copy_git_install_command)
         self.git_install_btn.setVisible(False)
         setup=QtWidgets.QPushButton("Setup Build Environment"); setup.clicked.connect(self.firmware_setup_environment)
-        detect=QtWidgets.QPushButton("Refresh"); detect.clicked.connect(self.refresh_firmware_environment)
+        detect=QtWidgets.QPushButton("Refresh"); detect.clicked.connect(lambda: (self.refresh_firmware_environment(), self.refresh_version_panel()))
         eg.addWidget(self.fw_tool_status,0,0,1,3); eg.addWidget(setup,0,3); eg.addWidget(detect,0,4)
         eg.addWidget(self.git_status,1,0,1,3); eg.addWidget(self.git_install_btn,1,3,1,2)
         v.addWidget(env)
@@ -5317,16 +5331,14 @@ class OATHelper(QtWidgets.QMainWindow):
         self.fw_ref=QtWidgets.QComboBox(); self.fw_ref.setMinimumWidth(260)
         self.fw_ref.addItem("develop - newest development (recommended)","develop")
         prep=QtWidgets.QPushButton("Prepare official source (first time only)"); prep.clicked.connect(self.firmware_prepare_source)
-        chk=QtWidgets.QPushButton("Check for updates"); chk.clicked.connect(self.firmware_check_updates)
+        chk=QtWidgets.QPushButton("Check for updates"); chk.clicked.connect(lambda: (self.firmware_check_updates(), self.check_latest_release()))
         upd=QtWidgets.QPushButton("Update to newest"); upd.clicked.connect(self.firmware_clone_update)
         sw=QtWidgets.QPushButton("Switch to the selected version"); sw.clicked.connect(self.firmware_switch_ref)
         rst=QtWidgets.QPushButton("Restore source"); rst.clicked.connect(self.firmware_reset_source)
-        rfr=QtWidgets.QPushButton("Refresh version"); rfr.clicked.connect(self.refresh_version_panel)
-        rel=QtWidgets.QPushButton("Check latest release"); rel.clicked.connect(self.check_latest_release)
         sgl.addWidget(self.fw_version_label,0,0,1,5)
         sgl.addWidget(self.fw_mount_label,1,0,1,3); sgl.addWidget(self.fw_release_label,1,3,1,2)
-        sgl.addWidget(QtWidgets.QLabel("Version/branch"),2,0); sgl.addWidget(self.fw_ref,2,1,1,2); sgl.addWidget(sw,2,3); sgl.addWidget(rfr,2,4)
-        sgl.addWidget(prep,3,0); sgl.addWidget(chk,3,1); sgl.addWidget(upd,3,2); sgl.addWidget(rst,3,3); sgl.addWidget(rel,3,4)
+        sgl.addWidget(QtWidgets.QLabel("Version/branch"),2,0); sgl.addWidget(self.fw_ref,2,1,1,2); sgl.addWidget(sw,2,3,1,2)
+        sgl.addWidget(prep,3,0); sgl.addWidget(chk,3,1); sgl.addWidget(upd,3,2); sgl.addWidget(rst,3,3,1,2)
         hint=QtWidgets.QLabel("Checking for updates runs git fetch only and does not change the source. It fetches only the changes instead of re-downloading everything, "
                               "and you can pin a specific release tag (v1.13.9 and so on). Configuration_local.hpp is kept outside the "
                               "repository and is not lost on update.")
@@ -5343,7 +5355,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self.fw_cancel_btn.clicked.connect(self.cancel_firmware_process)
         prog.addWidget(self.fw_progress,1); prog.addWidget(self.fw_progress_label); prog.addWidget(self.fw_cancel_btn)
         v.addLayout(prog)
-        fr=QtWidgets.QGroupBox("Factory Reset / EEPROM Clear"); fg=QtWidgets.QGridLayout(fr); self.factory_cmd=QtWidgets.QLineEdit(self.cfg.get("factory_reset_command",":XFR#") or ":XFR#"); self.factory_cmd.setPlaceholderText(":XFR# (clear the whole EEPROM)"); self.factory_confirm=QtWidgets.QLineEdit(); self.factory_confirm.setPlaceholderText("Type RESET"); rb=QtWidgets.QPushButton("FACTORY RESET"); rb.setObjectName("danger"); rb.clicked.connect(self.factory_reset); fg.addWidget(QtWidgets.QLabel("Command"),0,0); fg.addWidget(self.factory_cmd,0,1,1,3); fg.addWidget(QtWidgets.QLabel("Confirm"),1,0); fg.addWidget(self.factory_confirm,1,1); fg.addWidget(rb,1,2,1,2); v.addWidget(fr)
+        fr=QtWidgets.QGroupBox("Factory Reset / EEPROM Clear"); fg=QtWidgets.QGridLayout(fr); self.factory_cmd=QtWidgets.QLineEdit(FACTORY_RESET_COMMAND); self.factory_cmd.setReadOnly(True); self.factory_cmd.setToolTip("The firmware has exactly one factory reset command (:XFR#); it is not editable."); self.factory_confirm=QtWidgets.QLineEdit(); self.factory_confirm.setPlaceholderText("Type RESET"); rb=QtWidgets.QPushButton("FACTORY RESET"); rb.setObjectName("danger"); rb.clicked.connect(self.factory_reset); fg.addWidget(QtWidgets.QLabel("Command"),0,0); fg.addWidget(self.factory_cmd,0,1,1,3); fg.addWidget(QtWidgets.QLabel("Confirm"),1,0); fg.addWidget(self.factory_confirm,1,1); fg.addWidget(rb,1,2,1,2); v.addWidget(fr)
         self.fw_output=QtWidgets.QPlainTextEdit(); self.fw_output.setReadOnly(True); self.fw_output.setMinimumHeight(140); self.fw_output.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)); v.addWidget(self.fw_output,1)
         return w
 
@@ -5420,12 +5432,34 @@ class OATHelper(QtWidgets.QMainWindow):
             def done(items): self.config_text.appendPlainText("\nRuntime\n"+"\n".join(f"{k:16} {v}" for k,v in items))
             self.run_async(job,done)
 
+    # How the firmware answers (MeadeProtocol.hpp / parser, V1.13.x).  A ':'
+    # command that gets no '#'-terminated reply makes the driver wait for its
+    # timeout while holding the serial port; a one-character reply sent blind
+    # stays in the buffer and corrupts the next read.
+    _MEADE_NO_REPLY = ("hF", "hP", "Q", "XD", "XS", "MAL", "MAZ", "F+", "F-", "FS", "FF", "FQ")
+    _MEADE_NO_REPLY_EXACT = ("I", "Rs", "RS", "RM", "RC", "RG", "Mn", "Ms", "Me", "Mw",
+                             "F1", "F2", "F3", "F4")
+    _MEADE_ONE_CHAR = ("MX", "MH", "MT", "MAAH", "MS", "hU", "hZ", "FP", "FB", "gT")
+
+    @classmethod
+    def _meade_prefix_for(cls, body):
+        """'@' for no reply, '&' for one character, ':' for '#'-terminated."""
+        if body in cls._MEADE_NO_REPLY_EXACT or body.startswith(("Mg", "MG")):
+            return "@"
+        if body.startswith(cls._MEADE_NO_REPLY):
+            return "@"
+        if body.startswith(cls._MEADE_ONE_CHAR) or (body.startswith("S") and not body.startswith("SC")):
+            return "&"
+        return ":"
+
     def _normalize_command(self,cmd):
         cmd=(cmd or "").strip()
         if not cmd: raise ValueError("Command is empty")
-        if not cmd.startswith(":") and not cmd.startswith("@"): cmd=":"+cmd
-        if not cmd.endswith("#"): cmd+="#"
-        return cmd
+        explicit = cmd[0] in "@&"
+        body = cmd.lstrip(":@&").rstrip("#")
+        if not body: raise ValueError("Command is empty")
+        prefix = cmd[0] if explicit else self._meade_prefix_for(body)
+        return f"{prefix}{body}#"
 
     def run_diag_command(self,cmd): self.command_edit.setText(cmd); self.send_custom_command()
 
@@ -6025,8 +6059,7 @@ class OATHelper(QtWidgets.QMainWindow):
         fp.write_text("\n".join(lines),encoding="utf-8"); return fp
 
     def factory_reset(self):
-        try:cmd=self._normalize_command(self.factory_cmd.text())
-        except Exception as e:QtWidgets.QMessageBox.warning(self,_("Factory Reset"),str(e));return
+        cmd=FACTORY_RESET_COMMAND
         if self.factory_confirm.text().strip()!="RESET":QtWidgets.QMessageBox.warning(self,_("Factory Reset"),"Type RESET exactly in the Confirm field.");return
         if QtWidgets.QMessageBox.warning(self,_("FACTORY RESET"),"EEPROM calibration, home offsets and runtime settings may be erased. Continue?",QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)!=QtWidgets.QMessageBox.Yes:return
         def job(): return self._snapshot_before_reset(),self.indi.meade(cmd,timeout=10)

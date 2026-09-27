@@ -1,6 +1,8 @@
-import socket, threading, re, time
+import os, socket, threading, re, time
 
 DEV = "LX200 OpenAstroTech"
+# Optional trace of every Meade transaction, including bytes left on the wire.
+WIRE_LOG = os.environ.get("WIRE_LOG")
 
 
 class Mount:
@@ -84,9 +86,13 @@ class Mount:
             return ""
         if c in ("XSDLl", "XSDLu"): s.dec_low = s.dec_up = 0.0; return ""
         if c.startswith("XSS"): s.trim = float(c[3:]); return ""
-        if c.startswith("XSR"): s.ra_spd = float(c[3:]); return "1"
-        if c.startswith("XSD") and not c.startswith("XSDL"): s.dec_spd = float(c[3:]); return "1"
+        if c.startswith("XSR"): s.ra_spd = float(c[3:]); return ""            # firmware: no reply
+        if c.startswith("XSD") and not c.startswith("XSDL"): s.dec_spd = float(c[3:]); return ""
         if c.startswith("XSHD"): s.xshd = int(c[4:]); return ""
+        if c.startswith("XSHR"): s.xshr = int(c[4:]); return ""
+        if c == "hF": s.ra = 0; s.dec = 0; return ""                          # firmware: no reply
+        if c.startswith("Q"): s.tracking = False; return ""
+        if c.startswith("MHR") or c.startswith("MHD"): return "1"             # "1" if the search started
         if c.startswith("XGC"):
             body = c[3:]
             ra_h, dec_d = body.split("*")
@@ -95,7 +101,8 @@ class Mount:
         if c == "hP": s.ra = 0; s.dec = 0; s.tracking = False; return ""
         if c == "hU": s.tracking = True; return "1"
         if c in ("MT1", "MT0"): s.tracking = c == "MT1"; return "1"
-        if c.startswith("ZZCHARFAIL"): s.char_fail = c.endswith("1"); return "1"   # test hook
+        if c.startswith("ZZCHARFAIL"): s.char_fail = c.endswith("1"); return "1#"   # test hook
+        if c.startswith("Z") or c == "I": return ""   # unknown family / :I# - firmware stays silent
         if c.startswith("XD"): time.sleep(0.2); return ""
         if c.startswith("MXd"): s.dec += int(c[3:]); return "1"
         if c.startswith("MXr"): s.ra += int(c[3:]); return "1"
@@ -105,6 +112,52 @@ class Mount:
 
 
 m = Mount()
+
+
+class Wire:
+    """How lx200_OpenAstroTech moves bytes, including what it leaves behind.
+
+    '@' (executeMeadeCommandBlind) flushes the input, writes and never reads,
+    so a firmware reply such as the "1" of :MX/:SG/:SHL stays in the buffer.
+    '&' (getCommandChar) and ':' (getCommandString) do NOT flush: they read
+    whatever is waiting first. ':' commands are routed the way the driver's
+    executeMeadeCommand() does it (blind for F*/MA*/Mg*/XS*, one char for
+    MX*/MT*/S* except SC, '#'-terminated otherwise).
+    """
+    def __init__(self):
+        self.pending = ""
+
+    @staticmethod
+    def route(cmd):
+        c = cmd
+        if len(c) > 2:
+            if c[1] == "F" and c[2] not in "pB": return "blind"
+            if c[1] == "F" and c[2] == "B": return "char"
+            if c[1] == "M" and c[2] == "A": return "blind"
+            if c[1] == "M" and c[2] in "XT": return "char"
+            if c[1] == "M" and c[2] in "gG": return "blind"
+            if c[1] == "S" and c[2] != "C": return "char"
+            if c[1] == "X" and c[2] == "S": return "blind"
+        return "hash"
+
+    def transact(self, prefix, cmd, reply):
+        mode = {"@": "blind", "&": "char"}.get(prefix) or self.route(cmd)
+        if mode == "blind":
+            self.pending = reply          # flushed before the write, reply lands after
+            return ""
+        data = self.pending + reply
+        if mode == "char":
+            self.pending = data[1:]
+            return data[:1]
+        i = data.find("#")
+        if i < 0:                         # read timed out: bytes consumed, nothing returned
+            self.pending = ""
+            return ""
+        self.pending = data[i + 1:]
+        return data[:i + 1]
+
+
+wire = Wire()
 
 
 def handle(conn):
@@ -181,9 +234,15 @@ def handle(conn):
                 time.sleep(0.03)
                 prefix = cmdtxt[0]
                 with m.lock:
-                    res = m.cmd(":" + cmdtxt[1:])
-                if prefix == "@": res = ""
-                elif prefix == "&": res = res[:1]
+                    fw_reply = m.cmd(":" + cmdtxt[1:])
+                    if getattr(m, "extra_reply", None):   # :SC# answers twice - both land on the wire
+                        fw_reply += m.extra_reply
+                        m.extra_reply = None
+                    before = wire.pending
+                    res = wire.transact(prefix, ":" + cmdtxt[1:], fw_reply)
+                    if WIRE_LOG:   # WIRE_LOG=/tmp/wire.log python3 tests/test_x.py
+                        with open(WIRE_LOG, "a") as fh:
+                            fh.write(f"{cmdtxt!r:28} stale={before!r:8} -> {res!r:34} left={wire.pending!r}\n")
                 if prefix == "&" and m.char_fail and not cmdtxt.startswith("&ZZ"):
                     try:
                         conn.sendall(f'<setTextVector device="{DEV}" name="Meade" state="Ok">'
@@ -194,11 +253,6 @@ def handle(conn):
                     continue
                 send(f'<setTextVector device="{DEV}" name="Meade" state="Ok">'
                      f'<oneText name="OAT_MEADE_COMMAND">{res}</oneText></setTextVector>\n')
-                if getattr(m, "extra_reply", None):
-                    extra, m.extra_reply = m.extra_reply, None
-                    time.sleep(0.05)
-                    send(f'<setTextVector device="{DEV}" name="Meade" state="Ok">'
-                         f'<oneText name="OAT_MEADE_COMMAND">{extra}</oneText></setTextVector>\n')
                 continue
             if buf.startswith(b"<newSwitchVector"):
                 if b"</newSwitchVector>" not in buf: break

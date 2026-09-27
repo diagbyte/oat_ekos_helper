@@ -44,7 +44,7 @@ pump(3.0)
 w.indi.meade("@SC01/01/20#")
 pump(0.5)
 w._resync_meade()
-w.indi.meade("@SHL065722#")
+w.indi.meade("&SHL065722#")
 print("before : date=%s lst=%s drift=%.0f min" % (
     w.indi.meade(":GC#").strip(), w.indi.meade(":XGL#").strip(),
     w.mount_lst_drift_minutes()[0]))

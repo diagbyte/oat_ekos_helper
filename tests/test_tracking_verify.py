@@ -54,7 +54,7 @@ print("ON  :", on)
 assert on.startswith("✓ Tracking ON - verified by :GX#"), on
 
 # 2. ARM driver read failure: the reply is the byte 0xFF.
-assert w.indi.meade(":ZZCHARFAIL1#") == "1"
+assert w.indi.meade(":ZZCHARFAIL1#").rstrip("#") == "1"
 raw = w.indi.meade("&MT0#")
 print("raw '&' reply with 0xFF:", repr(raw))
 assert raw == "", raw                     # normalized, no U+FFFD any more
