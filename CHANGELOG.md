@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.6.3
+
+- **"Tracking ON request -> �" on a Raspberry Pi.** The garbled character
+  is not data from the mount. `lx200_OpenAstroTech` returns `char(-1)` from
+  `getCommandChar()` when the one-byte reply of an `&` command could not be
+  read; plain `char` is unsigned on ARM, so the `val != -1` check passes and
+  the driver publishes the byte 0xFF. Such a reply is now treated as "no
+  reply" for every `&` command (with a log line saying the command may still
+  have run), instead of being shown or compared as a real answer.
+- **Tracking ON/OFF and Unpark are verified with `:GX#`.** The result is read
+  from the TRK motion flag (`--T--`) after the command, so the log reports the
+  real state and warns when the mount did not follow the request, whatever the
+  reply byte was.
+- **Axis calibration kept "recommending" values that were never right.** The
+  tab told you to turn Tracking OFF, then measured RA as the difference of the
+  two plate-solved RA values. With tracking off the pointing is fixed to the
+  ground, so its sky RA grows by the sidereal time between the solves: about
+  2.5 % per minute for a 10° move, positive or negative depending on the move
+  direction. Every applied value therefore moved steps/degree by an amount
+  that depended on how quickly you clicked. RA is now measured as the
+  hour-angle difference when tracking is off (the elapsed time is taken
+  between the two record clicks) and as the sky RA difference when it is on;
+  the tracking state is read from `:GX#` at both solves and a run where it
+  changed is refused. A DEC move that crosses the pole (RA jumps 12 h) is
+  measured as 180° - |d1| - |d2| instead of ~0°. The hint now explains this
+  and asks to take up backlash before the start solve.
+  `tests/test_axis_calibration.py` covers it (the old formula gives +3.2 %
+  for a 76 s run).
+- `tests/fake_indi_server.py` models tracking (`:MT1#`/`:MT0#`, `:hU#`,
+  `:hP#` and the `:GX#` motion flag) and can reproduce the ARM 0xFF reply;
+  `tests/test_tracking_verify.py` covers both paths (0.6.2 logs the U+FFFD).
+
 ## 0.6.2
 
 - **AutoPA read every PAA value truncated to whole arc-minutes.** KStars writes

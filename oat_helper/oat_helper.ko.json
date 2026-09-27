@@ -201,7 +201,7 @@
  "If you have not run RA AutoHome yet, running it now keeps the DEC Home.": "RA AutoHome을 아직 안 했다면 지금 실행해도 DEC Home은 유지됩니다.",
  "Import Configuration_local.hpp": "Configuration_local.hpp 가져오기",
  "In 'Version/branch',": "'버전/브랜치'에서",
- "In Ekos, run Capture & Solve then Sync at each point before recording. Turning Tracking OFF during calibration is recommended. The EEPROM write command is never guessed; only the calculated value is shown.": "Ekos에서 각 지점마다 Capture & Solve → Sync를 실행한 뒤 기록하세요. Calibration 중 Tracking은 OFF를 권장합니다. 실제 EEPROM 적용 명령은 자동으로 추측하지 않고 계산값만 제시합니다.",
+ "In Ekos, run Capture & Solve then Sync at each point before recording. Keep Tracking in the same state for both solves: with Tracking OFF the sky keeps turning, so the helper measures RA as an hour-angle difference; with Tracking ON it uses the sky RA difference. Before (1), move the axis a little in the test direction to take up backlash, and calibrate well away from the pole.": "Ekos에서 각 지점마다 Capture & Solve → Sync를 실행한 뒤 기록하세요. 두 번의 솔브 동안 Tracking 상태는 같게 유지하세요: Tracking OFF면 하늘이 계속 돌기 때문에 RA를 시간각 차이로 계산하고, Tracking ON이면 하늘 RA 차이를 그대로 씁니다. ①을 누르기 전에 측정 방향으로 축을 조금 움직여 백래시를 없애고, 천구 극에서 충분히 떨어진 곳에서 보정하세요.",
  "Is the guide camera ready to observe the drift?": "가이드 카메라로 드리프트를 관찰할 준비가 되었나요?",
  "It is not needed for normal imaging.": "평소 촬영에는 필요하지 않습니다.",
  "Jog after AutoHome has finished.": "AutoHome 완료 후 Jog 하세요.",

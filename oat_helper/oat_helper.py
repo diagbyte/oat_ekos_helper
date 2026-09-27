@@ -52,7 +52,7 @@ from xml.sax.saxutils import escape
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "OAT Helper"
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 DEFAULT_DEVICE = "LX200 OpenAstroTech"
 CONFIG_DIR = Path.home() / ".config" / "oat-helper"
 DATA_DIR = Path.home() / ".local" / "share" / "oat-helper"
@@ -714,13 +714,32 @@ class IndiClient(QtCore.QObject):
                 if not ev.wait(timeout):
                     raise TimeoutError(f"No reply for {command}")
                 with self.pending_lock:
-                    return self.pending_result or ""
+                    result = self.pending_result or ""
+                if command.startswith("&"):
+                    result = self._clean_single_char_reply(command, result)
+                return result
             finally:
                 with self.pending_lock:
                     self.pending_event = None
                     self.pending_result = None
         finally:
             self.meade_lock.release()
+
+    # A failed one-character read comes back as the byte 0xFF: the
+    # lx200_OpenAstroTech driver returns char(-1) from getCommandChar(), and
+    # plain char is unsigned on ARM (Raspberry Pi), so "val != -1" passes and
+    # the driver publishes chr(255). Decoded as UTF-8 that is U+FFFD.
+    _NO_REPLY_CHARS = frozenset("\ufffd\xff")
+
+    def _clean_single_char_reply(self, command, result):
+        """Turn the driver's read-failure byte into an empty reply."""
+        if result and all(ch in self._NO_REPLY_CHARS for ch in result):
+            self.logMessage.emit(
+                f"No reply byte for {command}: the INDI driver reported a failed read "
+                "(0xFF from lx200_OpenAstroTech getCommandChar() on ARM). "
+                "The command may still have been executed.")
+            return ""
+        return result
 
     def meade_busy(self):
         """True while another thread owns the Meade channel."""
@@ -2126,7 +2145,7 @@ class OATHelper(QtWidgets.QMainWindow):
 
     def make_axis_cal_tab(self):
         w=QtWidgets.QWidget(); v=QtWidgets.QVBoxLayout(w)
-        t=QtWidgets.QLabel("In Ekos, run Capture & Solve then Sync at each point before recording. Turning Tracking OFF during calibration is recommended. The EEPROM write command is never guessed; only the calculated value is shown.")
+        t=QtWidgets.QLabel("In Ekos, run Capture & Solve then Sync at each point before recording. Keep Tracking in the same state for both solves: with Tracking OFF the sky keeps turning, so the helper measures RA as an hour-angle difference; with Tracking ON it uses the sky RA difference. Before (1), move the axis a little in the test direction to take up backlash, and calibrate well away from the pole.")
         t.setWordWrap(True); v.addWidget(t)
         g=QtWidgets.QGridLayout()
         self.axis_sel=QtWidgets.QComboBox(); self.axis_sel.addItems(["RA","DEC"])
@@ -2459,7 +2478,18 @@ class OATHelper(QtWidgets.QMainWindow):
     def unpark_mount(self):
         if not self.indi.running:
             self.log("An INDI connection is required.", logging.WARNING); return
-        self.meade_async("&hU#", lambda r: self.log(f"✓ Unpark - tracking started (reply={r})"))
+        def job():
+            reply = self.indi.meade("&hU#")
+            tracking, gx = self._read_tracking_state()
+            return reply, tracking, gx
+        def done(res):
+            reply, tracking, gx = res
+            if tracking:
+                self.log(f"✓ Unpark - tracking started, verified by :GX# ({gx['motion']})")
+            else:
+                self.log(f"✗ Unpark sent, but :GX# reports tracking OFF ({gx['state']}, {gx['motion']}); "
+                         f"reply was {reply!r}.", logging.WARNING)
+        self.run_async(job, done, lambda e: self.log(f"Unpark failed: {e}", logging.ERROR))
 
     def save_release_position_here(self):
         """Store the current position as the shutdown (release) position."""
@@ -3192,9 +3222,37 @@ class OATHelper(QtWidgets.QMainWindow):
         if not handled:
             super().keyPressEvent(event)
 
+    @staticmethod
+    def _gx_is_tracking(gx):
+        """Third motion character of :GX# is 'T' while the TRK stepper runs."""
+        motion = str(gx.get("motion", ""))
+        return len(motion) > 2 and motion[2] == "T"
+
+    def _read_tracking_state(self, settle=0.3):
+        """Return (tracking, gx) from :GX# - the reply byte alone is not trusted."""
+        time.sleep(settle)
+        gx = self._parse_gx(self.indi.meade(":GX#"))
+        return self._gx_is_tracking(gx), gx
+
     def set_tracking(self, enabled):
+        if not self.indi.running:
+            self.log("An INDI connection is required.", logging.WARNING); return
         cmd = "&MT1#" if enabled else "&MT0#"
-        self.meade_async(cmd, lambda r: self.log(f"Tracking {'ON' if enabled else 'OFF'} request -> {r}"))
+        want = "ON" if enabled else "OFF"
+        def job():
+            reply = self.indi.meade(cmd)
+            tracking, gx = self._read_tracking_state()
+            return reply, tracking, gx
+        def done(res):
+            reply, tracking, gx = res
+            state = "ON" if tracking else "OFF"
+            if tracking == bool(enabled):
+                note = "" if reply == "1" else f" (reply byte {reply!r} ignored)"
+                self.log(f"✓ Tracking {state} - verified by :GX# ({gx['state']}, {gx['motion']}){note}")
+            else:
+                self.log(f"✗ Tracking {want} requested, but :GX# reports {state} "
+                         f"({gx['state']}, {gx['motion']}); reply was {reply!r}.", logging.WARNING)
+        self.run_async(job, done, lambda e: self.log(f"Tracking {want} request failed: {e}", logging.ERROR))
 
     # ------------------------ time / location / HA ------------------------
     @staticmethod
@@ -5117,7 +5175,17 @@ class OATHelper(QtWidgets.QMainWindow):
     def axis_record_start(self):
         pos=self.indi.equatorial_eod()
         if not pos: self.log('EQUATORIAL_EOD_COORD unavailable. Connect the Ekos mount, run Capture & Solve then Sync, and try again.',logging.ERROR); return
-        self.axis_name=self.axis_sel.currentText(); self.axis_start=pos; self.axis_commanded_deg=None; self.axis_start_label.setText(f'Start solve: RA {pos[0]:.6f}h, DEC {pos[1]:+.6f}° ({self.axis_name})'); self.axis_result.clear()
+        self.axis_name=self.axis_sel.currentText(); self.axis_start=pos; self.axis_commanded_deg=None
+        # The time matters for RA with tracking OFF: the pointing is fixed to
+        # the ground, so its sky RA grows by the sidereal time in between.
+        self.axis_start_time=time.time(); self.axis_start_tracking=None
+        base=f'Start solve: RA {pos[0]:.6f}h, DEC {pos[1]:+.6f}° ({self.axis_name})'
+        self.axis_start_label.setText(base); self.axis_result.clear()
+        def job(): return self._read_tracking_state(settle=0.0)[0]
+        def done(trk):
+            self.axis_start_tracking=trk
+            self.axis_start_label.setText(f"{base}, tracking {'ON' if trk else 'OFF'}")
+        self.run_async(job,done,lambda e:self.log(f'Could not read the tracking state (:GX#): {e}',logging.WARNING))
 
     def axis_move_command(self):
         if not self.axis_start: self.log('Record Start Solve first.',logging.WARNING); return
@@ -5132,18 +5200,58 @@ class OATHelper(QtWidgets.QMainWindow):
     def _wrap_hours(h):
         return ((h+12.0)%24.0)-12.0
 
+    SIDEREAL_RATIO = 1.002737909   # sidereal hours per solar hour
+
+    @classmethod
+    def _axis_rotation_deg(cls, axis, start, end, elapsed_s, tracking):
+        """Mechanical rotation of one axis between two solved positions.
+
+        RA:  with tracking ON the sky RA difference is the commanded move.
+             With tracking OFF the pointing is fixed to the ground and its sky
+             RA grows by the sidereal time in between, so the rotation is the
+             hour-angle difference dRA - dLST. Using dRA alone was off by
+             ~2.5 % per minute between the solves for a 10 deg move.
+        DEC: the declination difference, or 180 - |d1| - |d2| when the move
+             crossed the pole (RA jumps by 12 h).
+        Returns (degrees, how_it_was_measured).
+        """
+        d_ra_h = cls._wrap_hours(end[0] - start[0])
+        if axis == 'RA':
+            if tracking:
+                return abs(d_ra_h) * 15.0, 'tracking ON: sky RA difference'
+            sky_h = max(0.0, float(elapsed_s)) / 3600.0 * cls.SIDEREAL_RATIO
+            rot_h = cls._wrap_hours(d_ra_h - sky_h)
+            return abs(rot_h) * 15.0, (f'tracking OFF: hour-angle difference '
+                                       f'(the sky turned {sky_h * 15.0:.4f}° in {elapsed_s:.0f} s)')
+        d1, d2 = float(start[1]), float(end[1])
+        if abs(abs(d_ra_h) - 12.0) < 1.0 and d1 * d2 > 0:
+            return 180.0 - abs(d1) - abs(d2), 'DEC move crossed the pole'
+        return abs(d2 - d1), 'DEC difference'
+
     def axis_record_end(self):
         if not self.axis_start or not self.axis_commanded_deg: self.log('Record the start and complete the move first.',logging.WARNING); return
         end=self.indi.equatorial_eod()
         if not end: self.log('EQUATORIAL_EOD_COORD unavailable.',logging.ERROR); return
-        axis=self.axis_name; start=self.axis_start; cmd=abs(float(self.axis_commanded_deg)); actual=abs(self._wrap_hours(end[0]-start[0])*15.0) if axis=='RA' else abs(end[1]-start[1])
-        if actual < 1e-5: self.axis_result.setPlainText('Measured movement is ~0°. Check that Capture & Solve then Sync updated the coordinates.'); return
-        def job(): return self._read_ra_steps_per_degree() if axis=='RA' else self._read_dec_steps_per_degree()
-        def done(current):
+        axis=self.axis_name; start=self.axis_start; cmd=abs(float(self.axis_commanded_deg))
+        elapsed=time.time()-float(getattr(self,'axis_start_time',None) or time.time())
+        def job():
+            spd=self._read_ra_steps_per_degree() if axis=='RA' else self._read_dec_steps_per_degree()
+            return spd, self._read_tracking_state(settle=0.0)[0]
+        def done(res):
+            current,trk_end=res
+            trk_start=getattr(self,'axis_start_tracking',None)
+            if trk_start is None: trk_start=trk_end
+            if bool(trk_start)!=bool(trk_end):
+                self.axis_result.setPlainText(
+                    f"Tracking was {'ON' if trk_start else 'OFF'} at the start solve and {'ON' if trk_end else 'OFF'} now.\n"
+                    "RA cannot be measured across a tracking change. Keep tracking in one state and measure again.")
+                return
+            actual,how=self._axis_rotation_deg(axis,start,end,elapsed,trk_end)
+            if actual < 1e-5: self.axis_result.setPlainText('Measured movement is ~0°. Check that Capture & Solve then Sync updated the coordinates.'); return
             recommended=current*cmd/actual; err=(actual/cmd-1.0)*100.0
             self.axis_calculated_spd=recommended; self.axis_calculated_axis=axis
             self.axis_apply_btn.setText(f'④ {axis} steps/degree = {recommended:.4f} apply (:XSR#/:XSD#)')
-            self.axis_result.setPlainText(f'{axis} Axis Verification\nStart: RA {start[0]:.6f}h DEC {start[1]:+.6f}°\nEnd:   RA {end[0]:.6f}h DEC {end[1]:+.6f}°\nCommanded: {cmd:.6f}°\nPlate-solved movement: {actual:.6f}°\nScale error: {err:+.3f}%\nCurrent steps/degree: {current:.8f}\nRecommended steps/degree: {recommended:.8f}\n\nPressing Apply writes the value with :XSR#/:XSD# and verifies it by reading back. Measure once more afterwards to confirm.')
+            self.axis_result.setPlainText(f'{axis} Axis Verification\nStart: RA {start[0]:.6f}h DEC {start[1]:+.6f}°\nEnd:   RA {end[0]:.6f}h DEC {end[1]:+.6f}°\nCommanded: {cmd:.6f}°\nPlate-solved movement: {actual:.6f}° ({how}, {elapsed:.0f} s between solves)\nScale error: {err:+.3f}%\nCurrent steps/degree: {current:.8f}\nRecommended steps/degree: {recommended:.8f}\n\nPressing Apply writes the value with :XSR#/:XSD# and verifies it by reading back. Measure once more afterwards to confirm.')
         self.run_async(job,done)
 
 

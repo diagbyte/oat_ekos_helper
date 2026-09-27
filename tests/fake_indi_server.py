@@ -12,12 +12,19 @@ class Mount:
         s.lst = "065722"   # deliberately stale, like the mount in the field
         s.date = "09/18/26"; s.localtime = "00:35:47"; s.offset = "-09"
         s.lat = "+37*34"; s.lon = "-127*00"; s.lon_deg = -127.0; s.extra_reply = None; s.lst_manual = None
+        s.tracking = True
+        # lx200_OpenAstroTech on ARM: getCommandChar() returns char(-1) on a
+        # failed read, plain char is unsigned there, so the driver publishes
+        # the byte 0xFF as the reply of an '&' command.
+        s.char_fail = False
         s.lock = threading.Lock()
 
     def cmd(s, c):
         c = c[1:-1]
         if c == "GX":
-            return f"Tracking,--T--,{s.ra},{s.dec},{s.trk},071906,+900000,#"
+            state = "Tracking" if s.tracking else "Idle"
+            motion = "--T--" if s.tracking else "-----"
+            return f"{state},{motion},{s.ra},{s.dec},{s.trk},071906,+900000,#"
         if c == "SHP":
             s.ra = s.dec = s.trk = 0; return "1"
         if c == "XGHD": return f"{s.xshd}#"
@@ -85,8 +92,10 @@ class Mount:
             ra_h, dec_d = body.split("*")
             return f"{int(float(ra_h) * 15 * s.ra_spd)},{int(float(dec_d) * s.dec_spd)}#"
         if c.startswith("R") and len(c) == 2: s.rate = c[1]; return ""
-        if c == "hP": s.ra = 0; s.dec = 0; return ""
-        if c == "hU": return "1"
+        if c == "hP": s.ra = 0; s.dec = 0; s.tracking = False; return ""
+        if c == "hU": s.tracking = True; return "1"
+        if c in ("MT1", "MT0"): s.tracking = c == "MT1"; return "1"
+        if c.startswith("ZZCHARFAIL"): s.char_fail = c.endswith("1"); return "1"   # test hook
         if c.startswith("XD"): time.sleep(0.2); return ""
         if c.startswith("MXd"): s.dec += int(c[3:]); return "1"
         if c.startswith("MXr"): s.ra += int(c[3:]); return "1"
@@ -175,6 +184,14 @@ def handle(conn):
                     res = m.cmd(":" + cmdtxt[1:])
                 if prefix == "@": res = ""
                 elif prefix == "&": res = res[:1]
+                if prefix == "&" and m.char_fail and not cmdtxt.startswith("&ZZ"):
+                    try:
+                        conn.sendall(f'<setTextVector device="{DEV}" name="Meade" state="Ok">'
+                                     f'<oneText name="OAT_MEADE_COMMAND">'.encode()
+                                     + b"\xff" + b'</oneText></setTextVector>\n')
+                    except Exception:
+                        pass
+                    continue
                 send(f'<setTextVector device="{DEV}" name="Meade" state="Ok">'
                      f'<oneText name="OAT_MEADE_COMMAND">{res}</oneText></setTextVector>\n')
                 if getattr(m, "extra_reply", None):
