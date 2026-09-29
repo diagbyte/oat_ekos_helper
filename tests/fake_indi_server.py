@@ -1,4 +1,4 @@
-import os, socket, threading, re, time
+import os, socket, sys, threading, re, time
 
 DEV = "LX200 OpenAstroTech"
 # Optional trace of every Meade transaction, including bytes left on the wire.
@@ -302,10 +302,15 @@ def handle(conn):
             break
 
 
+# Never default to 7624: that is the real indiserver port, and a test suite
+# that reaches a live mount would drive the actual motors.  The harness always
+# passes a port of its own.
+PORT = int(os.environ.get("FAKE_INDI_PORT") or (sys.argv[1] if len(sys.argv) > 1 else 17624))
+
 srv = socket.socket()
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(("127.0.0.1", 7624))
+srv.bind(("127.0.0.1", PORT))
 srv.listen(5)
+print(f"fake indi server listening on 127.0.0.1:{PORT}", flush=True)
 while True:
     c, _ = srv.accept()
     threading.Thread(target=handle, args=(c,), daemon=True).start()

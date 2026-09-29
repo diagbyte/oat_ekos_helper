@@ -44,10 +44,9 @@ w.target_dec.setValue(-80.0)
 w.check_target_reachable(); pump(2.0)
 print("   out-of-limit case:", w.target_check_label.text()[:110])
 
-# slew rate + tracking trim
-w.slew_rate_box.setCurrentIndex(0); pump(1.0)
+# tracking trim (slew rate moved out: Ekos' Mount tab owns TELESCOPE_SLEW_RATE)
 w.read_tracking_trim(); pump(1.5)
-print("5. slew rate cfg:", w.cfg["slew_rate"], "| tracking:", w.track_speed_label.text())
+print("5. tracking:", w.track_speed_label.text())
 w.track_trim.setValue(1.0025); w.save_tracking_trim(); pump(2.0)
 
 # EEPROM DEC home offset mode + SET HOME
@@ -65,17 +64,8 @@ w.axis_calculated_spd = 1010.5; w.axis_calculated_axis = "RA"
 w.apply_axis_calibration(); pump(3.0)
 print("7. RA steps/deg now:", w.indi.meade(":XGR#").strip())
 
-# checklist
-print("8. checklist items:", len(w.checklist_boxes), "| first:", w.checklist_boxes[0].text())
-w.checklist_boxes[0].setChecked(True)
-print("   saved done:", w.cfg["checklist_done"])
-
-# keyboard control
-from PyQt5 import QtCore, QtGui
-w.tabs.setCurrentWidget(w.mini_tab); pump(0.3)
-w.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Right, QtCore.Qt.NoModifier))
-pump(2.0)
-print("9. keyboard RA move issued:", any("RA" in l and "move" in l.lower() for l in w.log_box.toPlainText().splitlines()[-6:]))
+# the polar-axis setup numbers replaced the checklist on that page
+print("8. polar axis:", " | ".join(w.site_angle_label.text().splitlines())[:80])
 
 print("--- errors in log ---")
 for l in w.log_box.toPlainText().splitlines():

@@ -51,17 +51,22 @@ print("advanced toggle:", w.advanced_toggle.text())
 assert "고급" in w.advanced_toggle.text()
 w.advanced_toggle.setChecked(False)
 
-# the checklist editor must open with what is on screen, not English defaults
+# A dialog built at runtime must be translated too. translate_widget_tree only
+# reaches widgets that exist when it runs, so a QMessageBox nobody has opened is
+# invisible to it - these have to be wrapped in _() by hand.
 captured = {}
 from PyQt5 import QtWidgets as _Qt
-_Qt.QInputDialog.getMultiLineText = staticmethod(
-    lambda parent, title, label, text="", *a, **k: (captured.update(title=title, label=label, text=text), ("", False))[1])
-w.edit_checklist()
-print("checklist dialog title:", captured.get("title"))
-print("checklist dialog items:", captured.get("text", "").splitlines()[:2])
-assert "체크리스트" in captured.get("title", ""), "the editor title must be translated"
+_Qt.QMessageBox.question = staticmethod(
+    lambda parent, title, text, *a, **k: (captured.update(title=title, text=text),
+                                          _Qt.QMessageBox.No)[1])
+w.end_session()
+print("end-session dialog title:", captured.get("title"))
+print("end-session dialog body:", captured.get("text", "").splitlines()[:1])
+assert captured, "end_session must ask before moving the mount"
+assert any("\uac00" <= ch <= "\ud7a3" for ch in captured.get("title", "")), \
+    "the dialog title must be translated"
 assert any("\uac00" <= ch <= "\ud7a3" for ch in captured.get("text", "")), \
-    "the editor must start from the translated items"
+    "the dialog body must be translated"
 
 
 shutdown_app(app, w, _server)

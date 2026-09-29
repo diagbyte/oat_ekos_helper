@@ -19,7 +19,7 @@ def line(n, az, alt, tot, hour="1"):
 
 log.write_text(
     "[2026-09-18 1:04:00.000 KST INFO] [org.kde.kstars.ekos.align] - Polar Alignment Assistant\n"
-    + line(1, '-00° 12\' 34"', '+00° 03\' 21"', '00° 12\' 59"'))
+    + line(1, '-00° 12\' 34"', '+00° 03\' 21"', '00° 12\' 59"'), encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import ensure_indi_server, shutdown_app  # noqa: E402
@@ -55,14 +55,14 @@ w.autopa_running = True
 w.paa_offsets = {}; w.paa_last_match = None
 base = w.latest_ekos_paa(full=True)
 w.autopa_last_signature = base[0]
-with log.open("a") as fh:
+with log.open("a", encoding="utf-8") as fh:
     fh.write("noise line\n" + line(2, '-00° 02\' 04"', '+00° 01\' 11"', '00° 02\' 22"'))
 nxt = w.latest_ekos_paa()
 print("new refresh picked up:", nxt[0] != base[0],
       "az′:", round(nxt[2] * 60, 2), "alt′:", round(nxt[3] * 60, 2))
 
 # a corrupt PAA line must not block later good lines (old code aborted the file)
-with log.open("a") as fh:
+with log.open("a", encoding="utf-8") as fh:
     fh.write("[2026-09-18 1:06:00.000 KST INFO] [x] - PAA Refresh(3): Corrected az: ??? alt: ??? total: ???\n")
     fh.write(line(4, '-00° 00\' 30"', '+00° 00\' 10"', '00° 00\' 31"'))
 last = w.latest_ekos_paa()
@@ -77,7 +77,7 @@ def real_line(n, az, alt, tot):
     return (f"[2026-09-18T1:07:0{n}.123 KST INFO ][     org.kde.kstars.ekos.align] - "
             f"{quoted}\n")
 
-with log.open("a") as fh:
+with log.open("a", encoding="utf-8") as fh:
     fh.write(real_line(5, '-00° 12\' 34"', ' 00° 03\' 21"', ' 00° 13\' 00"'))
 real = w.latest_ekos_paa()
 print("quoted KStars line az′/alt′:", round(real[2] * 60, 3), round(real[3] * 60, 3))
@@ -86,7 +86,7 @@ assert abs(real[3] * 60 - 3.35) < 0.01, real[3] * 60
 
 # Sub-arcminute residuals must not collapse to 0 (the old parser read these
 # as 0/0 and declared AutoPA finished).
-with log.open("a") as fh:
+with log.open("a", encoding="utf-8") as fh:
     fh.write(real_line(6, '-00° 00\' 30"', '-00° 00\' 10"', ' 00° 00\' 32"'))
 small = w.latest_ekos_paa()
 print("sub-arcminute az″/alt″:", round(small[2] * 3600, 1), round(small[3] * 3600, 1))

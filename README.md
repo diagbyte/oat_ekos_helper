@@ -23,9 +23,11 @@ every night.
   SET HOME, GO TO HOME
 - Shutdown ("release") position so the camera's weight does not rest on the RA ring
 - Saved DEC Home restore — no re-aiming DEC after a power cycle
-- AutoPA: watches Ekos' Polar Alignment Assistant refresh results and drives the
-  ALT/AZ motors automatically, with direction, per-axis and runaway guards
-- Mini controller (buttons or keyboard), slew-rate selection, tracking trim
+- AutoPA: reads Ekos' Polar Alignment Assistant refresh results — straight from
+  KStars over D-Bus, or from the log file — and drives the ALT/AZ motors
+  automatically, with a settle window, direction, per-axis and runaway guards
+- Sidereal rate trim (slewing, direction buttons and slew rate are Ekos' own
+  Mount tab, so they are not duplicated here)
 - Mount monitor with the firmware's own DEC limits, target reachability check
 - Plate-solve axis calibration that can write steps/degree back to the mount,
   plus the one-off motor direction checks
@@ -51,6 +53,9 @@ the OAT is plugged into (the tab hides itself elsewhere).
 - OpenAstroTracker firmware **v1.13.x** (tested against v1.13.9; features are
   gated by the version reported by `:GVN#`)
 - Python 3 and PyQt5 (`sudo apt-get install python3-pyqt5`)
+- Qt's D-Bus bindings (`PyQt5.QtDBus`, shipped inside `python3-pyqt5`) so
+  AutoPA can read the PAA results directly from KStars; without them AutoPA
+  falls back to parsing the Ekos log file
 - `git`, for firmware version management — optional, but without it updates
   re-download the whole source and release tags cannot be pinned. The Firmware
   tab reports whether it is installed.
@@ -90,11 +95,23 @@ protocol as a second client, which means the mount itself can be somewhere else.
 mount — homing, SET HOME, Park, shutdown position, AutoPA moves — works across
 the network.
 
-**AutoPA reads a log file.** The Polar Alignment Assistant values come from the
-KStars log, which KStars writes on its own machine. Since the extension runs
-there too, this is automatic. If you start `oat_tools.py` by hand on a different
-machine than KStars, share the KStars `logs` folder and point
-`ekos_log_dir` in `~/.config/oat-helper/config.json` at it.
+**AutoPA talks to KStars directly.** The Polar Alignment Assistant values
+arrive over the session D-Bus bus (`org.kde.kstars.Ekos.Align`), so nothing has
+to be configured: no Ekos file logging, no log path. The AutoPA tab shows which
+source is in use.
+
+If D-Bus is unavailable — no session bus, no `python3-pyqt5.qtdbus`, or Ekos'
+Align module was never opened — it falls back to parsing the KStars log file and
+says so in the log. That path needs Ekos file logging on. If you start
+`oat_helper.py` by hand on a different machine than KStars, share the KStars
+`logs` folder and point `ekos_log_dir` in `~/.config/oat-helper/config.json`
+at it.
+
+**One correction per measurement.** An Ekos capture+solve takes about 25 s, so
+the refresh result that appears right after a correction still describes the
+error from *before* the move. "Settle after a correction" (30 s by default)
+makes AutoPA wait that out rather than applying the same correction twice and
+oscillating.
 
 **Flashing is local only.** Build and Flash drive PlatformIO over the USB serial
 port, so the Firmware tab is hidden unless this machine has a serial device
@@ -116,8 +133,10 @@ The UI language follows the desktop the extension runs on, for the same reason.
 2. `Update HA automatically + apply to OAT`
 3. `Run RA AutoHome`
 4. `Restore saved DEC Home` — or aim DEC by hand — then `SET HOME`
-5. Measure in Ekos PAA, then `Start PAA automatic correction`
-6. Image. When finished: `GO TO HOME` → `Move to shutdown position` → power off
+5. Measure in Ekos PAA, then `Start PAA automatic correction`. Check the first
+   move goes the right way — if an axis runs backwards, set `ALT_INVERT_DIR` /
+   `AZ_INVERT_DIR` in `Configuration_local.hpp`, not a tool-side option
+6. Image. When finished: **End session (Home → shutdown position)** → power off
 
 Step 6 records the reverse of the move, so step 4 brings DEC straight back to
 Home in the next session.
@@ -151,14 +170,17 @@ English.
 ## Development
 
 `tests/` contains a fake INDI server that speaks the OAT Meade dialect and
-headless PyQt tests for homing, the PAA log watcher, firmware management, view
-modes and i18n:
+headless PyQt tests for homing, the PAA watcher, AutoPA correction direction,
+firmware management, view modes and i18n:
 
 ```bash
-QT_QPA_PLATFORM=offscreen python3 tests/test_full_flow.py
+python3 tests/run_all.py            # everything, one summary
+python3 tests/run_all.py autopa     # just the AutoPA tests
 ```
 
-Each test starts its own fake INDI server, so nothing has to be running first.
+Each test starts its own fake INDI server on a private port, so nothing has to
+be running first — and the suite can never reach a real `indiserver` on 7624.
+GitHub Actions runs the same command on every push.
 
 ## License
 

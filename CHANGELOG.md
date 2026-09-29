@@ -1,5 +1,240 @@
 # Changelog
 
+## 0.6.7
+
+- **AZ was corrected in the wrong direction.** `az_move` was `+residual_az`
+  while ALT was `-residual_alt`, so every cycle drove the azimuth axis *away*
+  from the pole: the axis walked one way until the run was stopped by hand, and
+  the per-axis guard blamed the motors. KStars documents the PAA error signs as
+  correction directions (`ekos/align/polaralign.h`: "positive altitude error:
+  reduce altitude, positive azimuth error: point telescope more to the left"),
+  and the value logged as `PAA Refresh(n): Corrected az/alt` is the *remaining*
+  error - `polaralignmentassistant.cpp` passes `processRefreshCoords()`'s
+  `azE`/`altE` straight into the log string - so the correction is `-error` on
+  both axes. The asymmetry dates from the first commit, when "Invert AZ
+  correction" existed to paper over it; 0.6.0 removed that checkbox and left the
+  un-inverted default behind. Physical motor reversal belongs in
+  `ALT_INVERT_DIR` / `AZ_INVERT_DIR` in `Configuration_local.hpp`, never here.
+  `tests/test_autopa_direction.py` pins the sign on both axes, in both
+  directions.
+- **The same measurement was applied twice every cycle.** 0.6.2 rejected a
+  solution whose timestamp predated the finished correction - but Ekos logs a
+  PAA Refresh when the *plate solve completes*, ~25 s after the shutter opened,
+  so the line always lands *after* the move and that guard almost never fired in
+  the field. The image it describes was still taken before the move, so the
+  correction was applied a second time, the axis overshot to the mirror of the
+  error, and the run oscillated. New **"Settle after a correction"** on the
+  AutoPA tab (30 s by default): nothing measured inside that window is used, and
+  the log says why. `tests/test_autopa_settle.py` covers it.
+  `autopa_adjustment_finished` now starts unset, so the settle window can never
+  delay the *first* correction of a run.
+- **The PAA values come straight from KStars over D-Bus.** Ekos registers its
+  Align module at `/KStars/Ekos/Align` and that interface exports
+  `newLog(QString)` - the only signal there that carries the PAA numbers
+  (`polarResultUpdated` / `updatedErrorsChanged` live on
+  `PolarAlignmentAssistant`, a plain QObject that is never put on the bus). The
+  watcher subscribes to it, which removes the log file, the `LogToFile` setting,
+  the log-directory search, the 2 MB tail scan every 2.5 s and the timestamp
+  parsing: the value arrives when Ekos computes it, so "now" *is* the
+  measurement time. Falls back to the log file - with a log line saying which
+  and why - when QtDBus, the session bus or the Align interface is missing.
+  Exactly one source is ever live: two would deliver the same measurement under
+  two signatures and correct twice, which is the failure this watcher exists to
+  prevent. "PAA values from" on the AutoPA tab can force the old log-file path.
+- **Closing the window during a build/flash asked nothing and orphaned the
+  process.** It kept writing the microcontroller's flash with no progress bar
+  and no Cancel, and a half-written flash is how a board stops starting.
+  `closeEvent` now asks, terminates the process when confirmed, and stops all
+  seven timers instead of two - the test harness having to stop the rest by hand
+  was the tell.
+- **The import-configuration error dialog crashed instead of reporting the
+  error.** `fn, _ = QFileDialog.getOpenFileName(...)` rebinds `_`, the
+  translation function, to the filter string for the whole scope, so the
+  `except` branch's `_("Configuration")` raised
+  `TypeError: 'str' object is not callable` - and an Ekos-launched extension
+  shows no traceback. `tests/test_translation_hygiene.py` now fails on any scope
+  that both assigns `_` and calls it.
+- **Ten dialog bodies were never translated.** The confirmations for factory
+  reset, Park, the DEC travel limits, the shutdown position, restoring the
+  firmware source and restoring DEC Home, plus the whole "Starting the Ekos PAA"
+  walkthrough, were bare literals - English in every other language.
+  `test_i18n_coverage.py` walks the widget tree, so it can only see text that
+  exists at start-up, never a dialog nobody opened; the new hygiene test catches
+  these statically instead. The five stale Korean keys are gone and the catalog
+  validator is clean again.
+
+### Fewer controls, three that were missing
+
+Removed, because Ekos already does them and did them better:
+
+- **The Controller tab's slewing.** The direction pad, the keyboard slew, the
+  slew-rate selector and the ALT/AZ nudge buttons all duplicated Ekos' own Mount
+  and AutoPA controls - `TELESCOPE_SLEW_RATE` comes from `LX200Telescope`, which
+  this driver inherits, so Ekos has had that dropdown all along. What stays on
+  that tab is the sidereal rate trim (`:XGS#`/`:XSS#`), which Ekos has no
+  control for at all.
+- **Drift alignment (`:XD#`)** - Ekos has its own, and AutoPA supersedes it.
+- **Tracking ON/OFF buttons** - Ekos' Mount tab. `set_tracking()` stays: the
+  shutdown move uses it.
+- **Custom Meade buttons** - the free-text command box sits right next to them.
+- **The field checklist** - no functional dependency; that page now carries just
+  the two numbers the mount is physically set up with (polar axis altitude and
+  the bearing), which is what it was really for.
+
+Kept after checking, against the first instinct to cut them: the *expected motor
+profile* (the config inspector compares `Configuration_local.hpp` against it, and
+a 0.9° NEMA17 build legitimately differs from a 1.8° one, so hardcoding it would
+produce false warnings), Park/Unpark and the target reachability check (Ekos
+cannot know the OAT's RA travel limits).
+
+Added:
+
+- **The RA limit is shown as a time of day**, not only as hours remaining:
+  "RA tracking left: 02:35 (until 02:37)". The OAT cannot flip across the
+  meridian, so that is the hard end of the session - and "until 02:37" is what
+  actually answers "can I queue four hours?" at 11pm.
+- **One "End session (Home → shutdown position)" button.** These were two
+  buttons, and the second was the one people skipped - but it is the move that
+  records the DEC travel "Restore saved DEC Home" replays, so skipping it costs
+  the *next* session. `tests/test_end_session.py` covers the chain, including
+  that the shutdown move waits for Go To Home to release its busy flag.
+- **A reminder to recalibrate guiding when AutoPA finishes.** The ALT/AZ moves
+  change the mount axes relative to the guide camera, and Ekos reuses a stored
+  calibration by default (`Options::reuseGuideCalibration`), so nothing else
+  would have said it.
+
+### Review follow-ups
+
+- **Emergency Stop did not stop a queued axis.** `:Q#` halted the motors, but
+  `emergency_stop()` never cleared `pa_motion_active` or `pa_move_queue`, and a
+  two-axis correction hands its second axis to
+  `QTimer.singleShot(150, _send_next_pa_axis)`, which only tests that flag. The
+  AZ axis therefore started driving again about 150 ms *after* the emergency
+  stop. It now drops the queue and clears the motion state before sending `:Q#`.
+- **A solution in flight could move the mount after Stop.** `autopa_tick`
+  checked `autopa_running` and then handed a log scan to a worker; a QRunnable
+  cannot be cancelled, so after Stop the result still reached
+  `_apply_paa_solution`, which checked neither flag, and called `move_pa()`. The
+  D-Bus entry point did check it - the shared consumer now does too, which is
+  what its docstring already claimed. `tests/test_stop_really_stops.py` covers
+  both.
+- `closeEvent` stands the watcher, the queued axes and the timers down *before*
+  opening its modal question: a `QMessageBox` spins the event loop, so a
+  correction could be commanded while the user decided whether to close.
+- `_abort_pa_motion` now stamps `autopa_adjustment_finished` like
+  `_finish_pa_motion` does. An abort is exactly the case where an axis moved an
+  unknown amount, and it was the one path where the settle window stayed inert.
+- **"Ekos log file only" was a one-way door.** `_start_paa_dbus()` checked its
+  `_dbus_connected` latch before reading the setting, and nothing ever reset the
+  latch or unsubscribed, so once a run had connected the combo did nothing for
+  the rest of the process while the label still read "D-Bus". The setting is read
+  first now, and `stop_autopa_watch` drops the subscription.
+- **The D-Bus duplicate guard was dead code.** Its signature was a monotonic
+  counter, so `signature == autopa_last_signature` could never match and one
+  measurement delivered twice would be corrected twice - the overshoot this
+  release exists to prevent. It is derived from the message content now, as the
+  log path's already was.
+- The "Settle after a correction" value was never written back to
+  `config.json`, so `start_autopa_watch`'s own `save_config()` reset it to 30 on
+  every start. `paa_pending_move` is also reset per run: keeping the previous
+  run's residuals made the per-axis check compare against a different pointing
+  and advise reflashing a correctly-wired axis.
+- `_run_streamed` decodes as UTF-8 instead of the locale encoding. Under `LANG=C`
+  PlatformIO's output raised `UnicodeDecodeError` in the reader, which nulled
+  `_fw_process` *without* killing the flasher - so the new close guard saw "no
+  process" while avrdude was still writing.
+- An unhandled exception in any callback used to abort the process: PyQt5 sends
+  it to `qFatal()`, so the window vanished mid-session with no message and no log
+  line. `install_crash_guard()` records it instead. The suite could not have
+  caught this - `test_full_flow.py` installs its own `sys.excepthook`, and a
+  non-default hook is exactly what prevents the abort - so
+  `tests/test_crash_guard.py` runs a child process with no hook, the way Ekos
+  starts the extension.
+- `oat_helper/uninstall.sh` failed loudly when `_install_common.sh` is missing.
+  Under `set -uo pipefail` (no `-e`) the failed source did not abort:
+  `oat_kstars_dirs` became "command not found", the loop ran zero times, and the
+  script still printed "extension removed" and exited 0.
+- The three AutoPA tests pin `paa_source` to `logfile`. With the new `auto`
+  default, a development machine running KStars with the Align module open would
+  take the D-Bus path and never read the log fixtures those tests are built on.
+
+- **Pressing Start could freeze the window for up to 25 s.** `QDBusInterface`'s
+  constructor issues a blocking Introspect aimed at KStars, which is
+  single-threaded, so starting the watcher while Ekos was mid plate-solve left the
+  window unpainted with no Stop button - on a Pi over VNC that reads as a crash.
+  It asks the bus daemon (`isServiceRegistered`) instead, which is never busy
+  solving. Only `ImportError` used to be caught, so a broken
+  `DBUS_SESSION_BUS_ADDRESS` escaped the Start handler leaving `autopa_running`
+  True with no timer and no subscription; every failure now falls back to the log
+  file and says why.
+- **The settle window is measured in arrival time, not log time.** It compared a
+  timestamp parsed out of the KStars log against `datetime.now()` here.
+  `latest_ekos_paa`'s own docstring says those clocks disagree - which is why
+  novelty is decided by signature - and the README documents sharing the log
+  folder from another machine. A log clock lagging by more than the settle value
+  made `ts <= finished + settle` true for every future solution: the run hung on
+  "still settling" all night, and `sol` stayed truthy so the 60 s watchdog never
+  fired. The line's own timestamp is still used, but only while the two clocks
+  are within 5 minutes of each other, and the mismatch is reported once.
+  `tests/test_autopa_clock_skew.py` covers it.
+- **A run now has a floor.** `autopa_adjustment_finished` used to double as one,
+  rejecting any line older than the button press; setting it to `None` (so the
+  settle window could not delay the first correction) removed that. A dedicated
+  `autopa_started_at` restores it, which also closes the hole where Stop then
+  Start inside a solve window cleared a genuine timestamp. On the baseline-scan
+  error path the poller could otherwise act on a PAA Refresh from hours ago.
+- **The D-Bus source has retry and a liveness watchdog.** Its branch returned
+  before `autopa_timer.start()`, so a refused move (axis busy, mount briefly
+  disconnected) dropped the solution with nothing to retry it - a pushed solution
+  has no second chance, unlike a log line the poller re-reads from cache - and
+  nothing noticed if Ekos died, because the "no PAA value" warning only fires on
+  the polling path. The timer runs in both modes now; in D-Bus mode it retries a
+  held solution and reports silence instead of scanning the log, so the two
+  sources still never both consume a measurement.
+- **Runtime status text reaches the catalog.** `translate_widget_tree` looks up a
+  widget's *current* text, so anything a later `setText` writes is invisible to
+  it and to `test_i18n_coverage.py`, which walks the tree at start-up. On a
+  Korean desktop the AutoPA status field was the one English field on its tab.
+  `test_translation_hygiene.py` now fails on an unwrapped `setText` literal as
+  well as an unwrapped dialog body.
+- **Upgrade note, logged once: if you set `AZ_INVERT_DIR` as a workaround,
+  revert it.** 0.6.4-0.6.6 drove AZ the wrong way and, when the residual grew,
+  advised exactly that. A mount that followed the advice is now inverted twice
+  and drives away from the pole for two cycles - each longer because of the
+  settle window - before the runaway guard stops the run. The per-axis advice
+  itself now says so too.
+
+### Tests and CI
+
+- **The suite could drive a real mount.** `ensure_indi_server()` reused whatever
+  was listening on 127.0.0.1:7624 - which on the Raspberry Pi that runs the
+  mount is a real `indiserver`. `test_full_flow.py` auto-accepts every dialog
+  and runs SET HOME, GO TO HOME, Park, jogs, AutoPA moves and
+  `apply_axis_calibration` (which writes steps/degree to EEPROM). Each test now
+  starts its own fake server on a private ephemeral port and points the app at
+  it; the fake server refuses to default to 7624, and a test that dies before
+  `shutdown_app` no longer leaks a server for the next one to inherit.
+- Log fixtures are written as UTF-8 rather than in the machine's locale
+  encoding: on a cp949 console the `°` became an undecodable byte, so no PAA
+  line parsed and three tests failed for a reason that had nothing to do with
+  the code.
+- `python3 tests/run_all.py` runs everything (optionally filtered by name) and
+  prints one summary. GitHub Actions runs it, pyflakes over the whole tree, and
+  a syntax check of the installer scripts on every push and pull request.
+- New: `test_autopa_direction.py`, `test_autopa_settle.py`,
+  `test_autopa_dbus.py`, `test_close_during_flash.py`,
+  `test_translation_hygiene.py`.
+
+### Housekeeping
+
+- `oat_helper/uninstall.sh` reads the KStars directory list from
+  `oat_kstars_dirs()` instead of keeping its own copy, which had already drifted
+  into a silent "uninstall misses a path" bug waiting to happen.
+- A `.gitignore`, so `__pycache__` stops showing up as untracked noise in a repo
+  whose installer deletes it.
+- The user-visible strings that still said "OAT Tools" now say "OAT Helper", and
+  step 6 of the PAA walkthrough is a complete sentence again.
+
 ## 0.6.6
 
 - **SET HOME writes the mount clock first.** The mount keeps no time across a

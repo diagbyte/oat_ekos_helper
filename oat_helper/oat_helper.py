@@ -43,6 +43,7 @@ import urllib.request
 import zipfile
 import threading
 import time
+import traceback
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -52,7 +53,7 @@ from xml.sax.saxutils import escape
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 APP_NAME = "OAT Helper"
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 # The firmware's only factory reset: clears the whole EEPROM (MeadeProtocol :XFR#).
 FACTORY_RESET_COMMAND = ":XFR#"
 # Blind no-op: the driver flushes its input before a blind write, and the
@@ -866,10 +867,23 @@ class OATHelper(QtWidgets.QMainWindow):
         self.autopa_busy = False
         self.autopa_last_entry = None  # legacy diagnostic timestamp only
         self.autopa_last_signature = None
-        self.autopa_adjustment_finished = datetime.now()
+        # None until an automatic correction actually finishes: the settle
+        # window must never delay the first correction of a run.
+        self.autopa_adjustment_finished = None
+        self.autopa_started_at = None
+        self._paa_skew_warned = False
+        # A solution that could not be acted on yet, retried by the tick.
+        self.paa_deferred = None
+        self._dbus_last_paa = None
+        self._dbus_quiet_warned = False
         self.autopa_was_moving = False
         self.autopa_prev_error_arcmin = None
         self.autopa_worse_count = 0
+        # Where the PAA numbers come from: "dbus" (pushed by Ekos) or "logfile"
+        # (polled). Exactly one is live at a time - two would apply the same
+        # measurement twice under two different signatures.
+        self.paa_source = "logfile"
+        self._dbus_connected = False
 
         # AutoPA motion interlock.  Never send another MAL/MAZ while an
         # earlier AutoPA move is still active.  This protects the OAT firmware
@@ -1000,10 +1014,20 @@ class OATHelper(QtWidgets.QMainWindow):
             # firmware Park then moves DEC by -offset, so use the tool's DEC Park).
             "dec_home_offset_mode": "clear",
             "autopa_wait_two_solutions": True,
+            # Ekos logs a PAA Refresh line when the solve finishes, ~25 s after
+            # the shutter opened, so a line that lands just after a correction
+            # still describes the error from before it. Nothing measured within
+            # this many seconds of a finished correction is used.
+            "autopa_settle_seconds": 30,
+            # "auto" uses KStars' Ekos Align D-Bus signal when it is reachable
+            # and the Ekos log file otherwise; "logfile" forces the old path.
+            "paa_source": "auto",
+            # Set to the running VERSION once the AZ direction notice has been
+            # shown, so it appears once per upgrade instead of every session.
+            "az_sign_notice_version": "",
             "autohome_ra_on_connect": False,
             "sync_clock_before_set_home": True,
             "restore_dec_home_on_connect": False,
-            "slew_rate": "M",
             # Shutdown ("release") position: where the axes are left before
             # power off so the camera's weight does not hang on the RA ring.
             # Degrees relative to Home; negative DEC lowers the lens.
@@ -1017,18 +1041,13 @@ class OATHelper(QtWidgets.QMainWindow):
             # Firmware maintenance (only usable on the machine holding the USB cable)
             "firmware_source_dir": "", "firmware_env": "mksgenlv21", "firmware_port": "/dev/ttyACM0",
             "firmware_ref": "develop", "firmware_last_fetch": "", "latest_release_tag": "",
-            "expected_ra_spr": 400, "expected_dec_spr": 400, "expected_az_spr": 200,
-            "expected_alt_spr": 200, "expected_autopa_version": 2,
-            "custom_commands": [{"name": f"Custom {i}", "command": ""} for i in range(1, 5)],
             # Show the firmware tab even when no serial port is visible here.
             "always_show_firmware_tab": False,
-            "drift_align_seconds": 60,
-            "checklist": [
-                "Tripod/base levelled", "Base aimed at true north",
-                "Polar axis altitude set as shown above", "Cables routed with slack",
-                "Power/battery checked", "Camera and guider connected", "Dew heater checked",
-            ],
-            "checklist_done": [],
+            # Build-specific, so they stay editable: the config inspector warns
+            # when Configuration_local.hpp disagrees, and a 0.9° NEMA17 build
+            # legitimately differs from a 1.8° one.
+            "expected_ra_spr": 400, "expected_dec_spr": 400, "expected_az_spr": 200,
+            "expected_alt_spr": 200, "expected_autopa_version": 2,
             # Optional: set this by hand to also get a compass bearing.
             # It cannot be computed from the coordinates alone.
             "magnetic_declination_deg": None,
@@ -1116,8 +1135,6 @@ class OATHelper(QtWidgets.QMainWindow):
                 "expected_az_spr": self.expected_az_spr.value(),
                 "expected_alt_spr": self.expected_alt_spr.value(),
                 "expected_autopa_version": self.expected_autopa_ver.value(),
-                "custom_commands": [{"name": n.text().strip(), "command": c.text().strip()}
-                                    for n, c in zip(self.custom_name_edits, self.custom_cmd_edits)],
             })
             if hasattr(self, "fw_ref"):
                 ref = self.fw_ref.currentData() or self.fw_ref.currentText().strip()
@@ -1493,8 +1510,8 @@ class OATHelper(QtWidgets.QMainWindow):
         g.addWidget(paa_hint,5,0,1,4)
         v.addWidget(box)
 
-        # Pre-session checklist: the physical checks the software cannot verify.
-        chk = QtWidgets.QGroupBox("Field checklist")
+        # The two numbers the mount has to be physically set up with.
+        chk = QtWidgets.QGroupBox("Polar axis setup")
         cv = QtWidgets.QVBoxLayout(chk); cv.setSpacing(2)
         self.site_angle_label = QtWidgets.QLabel("Waiting for the site from Ekos...")
         self.site_angle_label.setWordWrap(True)
@@ -1502,19 +1519,6 @@ class OATHelper(QtWidgets.QMainWindow):
         self.site_note_label = self._hint("")
         cv.addWidget(self.site_angle_label)
         cv.addWidget(self.site_note_label)
-        self.checklist_boxes = []
-        done_items = set(self.cfg.get("checklist_done") or [])
-        for item in (self.cfg.get("checklist") or []):
-            cb = QtWidgets.QCheckBox(str(item))
-            cb.setChecked(str(item) in done_items)
-            cb.toggled.connect(self._save_checklist_state)
-            self.checklist_boxes.append(cb)
-            cv.addWidget(cb)
-        row = QtWidgets.QHBoxLayout()
-        reset_chk = QtWidgets.QPushButton("Clear all"); reset_chk.clicked.connect(self.reset_checklist)
-        edit_chk = QtWidgets.QPushButton("Edit items"); edit_chk.clicked.connect(self.edit_checklist)
-        row.addWidget(reset_chk); row.addWidget(edit_chk); row.addStretch(1)
-        cv.addLayout(row)
         v.addWidget(chk)
         v.addStretch(1)
         return w
@@ -1576,40 +1580,6 @@ class OATHelper(QtWidgets.QMainWindow):
                 bearing=info["bearing"])
         self.site_note_label.setText(note)
 
-    def _save_checklist_state(self):
-        self.cfg["checklist_done"] = [cb.text() for cb in getattr(self, "checklist_boxes", []) if cb.isChecked()]
-
-    def reset_checklist(self):
-        for cb in getattr(self, "checklist_boxes", []):
-            cb.setChecked(False)
-        self._save_checklist_state()
-
-    def edit_checklist(self):
-        """Edit the checklist items.
-
-        The boxes on screen are already translated, so the editor starts from
-        what is actually shown rather than the English defaults kept in the
-        config - otherwise a Korean UI opens an English editor.
-        """
-        shown = [box.text() for box in getattr(self, "checklist_boxes", []) if not box.isHidden()]
-        current = "\n".join(shown or (self.cfg.get("checklist") or []))
-        text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self, _("Edit checklist"), _("Enter one item per line:"), current)
-        if not ok:
-            return
-        items = [line.strip() for line in text.splitlines() if line.strip()]
-        self.cfg["checklist"] = items
-        self.cfg["checklist_done"] = []
-        self.save_config()
-        for box in getattr(self, "checklist_boxes", []):
-            box.setChecked(False)
-            box.setVisible(False)
-        for box, item in zip(self.checklist_boxes, items):
-            box.setText(item)
-            box.setVisible(True)
-        QtWidgets.QMessageBox.information(
-            self, _("Edit checklist"), _("Saved."))
-
     def _set_wizard_label(self, label, text, good=False, warn=False):
         if not hasattr(self, label):
             return
@@ -1666,7 +1636,7 @@ class OATHelper(QtWidgets.QMainWindow):
     def show_paa_guidance(self):
         self.wizard_paa_guidance_seen = True
         self.update_wizard_status()
-        text = (
+        text = _(
             "1) Leave the OAT base pointing north and do not rotate the whole OAT by hand. AutoPA moves it with motors during automatic correction only.\n\n"
             "2) In the KStars sky map, pick a star or star field actually visible through the southern window and press [Slew]. "
             "You issue the Slew command and the OAT moves RA/DEC automatically.\n\n"
@@ -1674,9 +1644,9 @@ class OATHelper(QtWidgets.QMainWindow):
             "4) Open Ekos > Align > Polar Alignment Assistant. You do not need to see the pole. "
             "Turn Auto Slew on and start with a rotation of about 20°. For East/West, pick the side that is not blocked by a window frame or wall during the two RA rotations.\n\n"
             "5) Once the PAA measurement starts, Ekos rotates the RA axis twice and plate-solves three frames.\n\n"
-            "6) Start Refresh in the PAA correction screen. If you already pressed [Start auto correction] in OAT Tools, "
-            "reads the new Refresh result and moves AutoPA ALT/AZ automatically.\n\n"
-            "7) When a new Refresh result is at or below the target accuracy, OAT Tools shows Ready.")
+            "6) Start Refresh in the PAA correction screen. Once you have pressed [Start auto correction] here, "
+            "OAT Helper reads each new Refresh result and moves AutoPA ALT/AZ automatically.\n\n"
+            "7) When a new Refresh result is at or below the target accuracy, OAT Helper shows Ready.")
         QtWidgets.QMessageBox.information(self, _("Starting the Ekos PAA"), text)
 
     def wizard_start_autopa(self):
@@ -1864,7 +1834,19 @@ class OATHelper(QtWidgets.QMainWindow):
         rel.addWidget(QtWidgets.QLabel("Shutdown position  DEC")); rel.addWidget(self.release_dec)
         rel.addWidget(QtWidgets.QLabel("RA")); rel.addWidget(self.release_ra)
         rel.addWidget(save_rel); rel.addWidget(self.release_btn, 1)
+        # Skipping the shutdown move is what breaks the next session: it is the
+        # move that records the reverse travel "Restore DEC Home" replays. One
+        # button, named after the intent, is much harder to forget than two.
+        self.end_session_btn = QtWidgets.QPushButton("End session (Home → shutdown position)")
+        self.end_session_btn.setObjectName("primary")
+        self.end_session_btn.setMinimumHeight(32)
+        self.end_session_btn.setToolTip(_(
+            "Runs GO TO HOME and then moves to the shutdown position, in order.\n"
+            "Do this every night: the shutdown move is what records the travel that "
+            "'Restore saved DEC Home' replays in the next session."))
+        self.end_session_btn.clicked.connect(self.end_session)
         fg.addWidget(rel_box,3,0,1,4)
+        fg.addWidget(self.end_session_btn,4,0,1,4)
 
         note = self._hint(
             "SET HOME is firmware :SHP# (the same routine as the LCD 'Set home pos?'). A sensorless DEC is reset when power is removed. "
@@ -1974,6 +1956,16 @@ class OATHelper(QtWidgets.QMainWindow):
         self.wait_two.setToolTip(_("Correct from the second consecutive PAA solution; the first solve after a slew is the noisiest."))
         self.wait_two.setChecked(bool(self.cfg.get("autopa_wait_two_solutions", True)))
         self.wait_two.toggled.connect(lambda on: self.cfg.__setitem__("autopa_wait_two_solutions", bool(on)))
+        self.autopa_settle = QtWidgets.QSpinBox(); self.autopa_settle.setRange(0, 300); self.autopa_settle.setSuffix(" s")
+        self.autopa_settle.setValue(int(self.cfg.get("autopa_settle_seconds", 30)))
+        self.autopa_settle.setToolTip(_(
+            "Ekos logs a PAA Refresh when the plate solve finishes, about 25 s after the shutter opened, "
+            "so the line that appears right after a correction still shows the error from before it. "
+            "Set this to one capture+solve cycle."))
+        # start_autopa_watch() calls save_config() first thing, so without this
+        # the spin box was rewritten from the stale config value on every start.
+        self.autopa_settle.valueChanged.connect(
+            lambda v: self.cfg.__setitem__("autopa_settle_seconds", int(v)))
         self.pa_start = QtWidgets.QPushButton("Start auto correction"); self.pa_start.setObjectName("primary")
         self.pa_stop = QtWidgets.QPushButton("Stop")
         self.pa_start.clicked.connect(self.start_autopa_watch); self.pa_stop.clicked.connect(self.stop_autopa_watch)
@@ -1982,13 +1974,28 @@ class OATHelper(QtWidgets.QMainWindow):
         g.addWidget(QtWidgets.QLabel("ALT correction offset"),0,2); g.addWidget(self.alt_offset,0,3)
         g.addWidget(QtWidgets.QLabel("AZ correction offset"),1,0); g.addWidget(self.az_offset,1,1)
         g.addWidget(QtWidgets.QLabel("Max automatic move per cycle"),1,2); g.addWidget(self.max_move,1,3)
-        g.addWidget(self.wait_two,2,0,1,4)
+        g.addWidget(self.wait_two,2,0,1,2)
+        g.addWidget(QtWidgets.QLabel("Settle after a correction"),2,2); g.addWidget(self.autopa_settle,2,3)
+        self.paa_source_box = QtWidgets.QComboBox()
+        self.paa_source_box.addItem("Automatic (D-Bus, else log file)", "auto")
+        self.paa_source_box.addItem("Ekos log file only", "logfile")
+        index = self.paa_source_box.findData(str(self.cfg.get("paa_source", "auto")).lower())
+        self.paa_source_box.setCurrentIndex(index if index >= 0 else 0)
+        self.paa_source_box.setToolTip(_(
+            "KStars publishes the PAA result on the session bus the moment it has it "
+            "(org.kde.kstars.Ekos.Align). That needs no log file and no Ekos file-logging setting. "
+            "Pick the log file only to reproduce the old behaviour."))
+        self.paa_source_box.currentIndexChanged.connect(
+            lambda _i: self.cfg.__setitem__("paa_source", self.paa_source_box.currentData()))
+        self.paa_source_label = QtWidgets.QLabel("-")
+        g.addWidget(QtWidgets.QLabel("PAA values from"),3,0); g.addWidget(self.paa_source_box,3,1)
+        g.addWidget(QtWidgets.QLabel("In use"),3,2); g.addWidget(self.paa_source_label,3,3)
         pa_diag = QtWidgets.QPushButton("Diagnose PAA log")
         pa_diag.setToolTip(_("Prints the Ekos log paths/settings and the most recent PAA Refresh values to the log."))
         pa_diag.clicked.connect(self.diagnose_paa_log)
-        g.addWidget(self.pa_start,3,0); g.addWidget(self.pa_stop,3,1); g.addWidget(pa_diag,3,2); g.addWidget(self.pa_status,3,3)
-        note = QtWidgets.QLabel("Watches the newest 'PAA Refresh ... Corrected az ... alt ... total' line in the Ekos log. Verify the sign with a manual ±1' move first, then start automatic correction.")
-        note.setWordWrap(True); g.addWidget(note,4,0,1,4)
+        g.addWidget(self.pa_start,4,0); g.addWidget(self.pa_stop,4,1); g.addWidget(pa_diag,4,2); g.addWidget(self.pa_status,4,3)
+        note = QtWidgets.QLabel("Reads the newest 'PAA Refresh ... Corrected az ... alt ... total' result from Ekos and drives each axis against the error. Verify the sign with a manual ±1' move first, then start automatic correction.")
+        note.setWordWrap(True); g.addWidget(note,5,0,1,4)
         v.addWidget(auto)
 
         manual = QtWidgets.QGroupBox("AutoPA manual control (reuses the existing INDI POLAR_ALT / POLAR_AZ)")
@@ -2028,105 +2035,36 @@ class OATHelper(QtWidgets.QMainWindow):
         return w
 
     def make_mini_tab(self):
+        """Tracking rate trim.
+
+        The direction pad, the keyboard slew, the slew-rate selector and the
+        ALT/AZ nudge buttons all duplicated Ekos' own Mount and AutoPA controls
+        (TELESCOPE_SLEW_RATE is provided by LX200Telescope, which this driver
+        inherits), so they are gone. The sidereal rate trim has no Ekos
+        equivalent and stays.
+        """
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        info = self._hint(
-            "Left/right is RA, up/down is DEC, diagonals move both axes. Degree-to-step conversion uses the firmware :XGR# / :XGD# values.")
-        v.addWidget(info)
+        info = QtWidgets.QLabel(
+            "Slewing, direction buttons and slew rate live in Ekos' own Mount tab. "
+            "What is here is the OAT's sidereal rate trim, which Ekos has no control for.")
+        info.setWordWrap(True); v.addWidget(info)
 
-        box = QtWidgets.QGroupBox("RA / DEC direction control")
-        g = QtWidgets.QGridLayout(box)
-        g.setHorizontalSpacing(8); g.setVerticalSpacing(8)
-
-        # Both axes are user-facing degrees. Each move reads the firmware's
-        # active steps/degree value so motor angle, microstepping and reduction
-        # are never guessed in OAT Tools.
-        self.mini_ra_degrees = QtWidgets.QComboBox()
-        for deg in (1, 5, 15):
-            self.mini_ra_degrees.addItem(f"{deg}°", deg)
-        self.mini_ra_degrees.setCurrentIndex(1)
-
-        self.mini_dec_degrees = QtWidgets.QComboBox()
-        for deg in (1, 5, 15):
-            self.mini_dec_degrees.addItem(f"{deg}°", deg)
-        self.mini_dec_degrees.setCurrentIndex(1)
-
-        self.slew_rate_box = QtWidgets.QComboBox()
-        for label, code in (("Slow (G)", "G"), ("Medium (C)", "C"), ("Fast (M)", "M"), ("Max (S)", "S")):
-            self.slew_rate_box.addItem(label, code)
-        idx = self.slew_rate_box.findData(self.cfg.get("slew_rate", "M"))
-        self.slew_rate_box.setCurrentIndex(max(0, idx))
-        self.slew_rate_box.currentIndexChanged.connect(
-            lambda _i: self.set_slew_rate(self.slew_rate_box.currentData()))
-        g.addWidget(QtWidgets.QLabel("RA move per press"), 0, 0)
-        g.addWidget(self.mini_ra_degrees, 0, 1)
-        g.addWidget(QtWidgets.QLabel("DEC move per press"), 0, 2)
-        g.addWidget(self.mini_dec_degrees, 0, 3)
-        g.addWidget(QtWidgets.QLabel("Slew rate"), 4, 0)
-        g.addWidget(self.slew_rate_box, 4, 1)
-        kb = self._hint("Keyboard: left/right RA, up/down DEC, W/S ALT, A/D AZ (while this tab is active)")
-        g.addWidget(kb, 4, 2, 1, 2)
-
-        pad = QtWidgets.QGridLayout()
-        pad.setHorizontalSpacing(8); pad.setVerticalSpacing(8)
-        directions = [
-            (0, 0, "↖", -1, +1), (0, 1, "↑", 0, +1), (0, 2, "↗", +1, +1),
-            (1, 0, "←", -1, 0),                          (1, 2, "→", +1, 0),
-            (2, 0, "↙", -1, -1), (2, 1, "↓", 0, -1), (2, 2, "↘", +1, -1),
-        ]
-        for row, col, text, dx, dy in directions:
-            b = QtWidgets.QPushButton(text)
-            b.setMinimumSize(58, 44)
-            b.setStyleSheet("font-size: 19px; font-weight: 600;")
-            b.clicked.connect(lambda _=False, x=dx, y=dy: self.mini_direction_move(x, y))
-            pad.addWidget(b, row, col)
-
-        home = QtWidgets.QPushButton("HOME")
-        home.setMinimumSize(58, 44)
-        home.setStyleSheet("font-size: 12px; font-weight: 700;")
-        home.setToolTip(_("Firmware Go To Home (:hF#) - return to the RA/DEC logical 0 fixed by the final SET HOME"))
-        home.clicked.connect(self.mini_goto_home)
-        pad.addWidget(home, 1, 1)
-
-        pad_wrap = QtWidgets.QWidget(); pad_wrap.setLayout(pad)
-        g.addWidget(pad_wrap, 1, 0, 1, 4, QtCore.Qt.AlignHCenter)
-
-
-        note = self._hint(
-            "HOME uses firmware :hF# to move to the logical Home(0) fixed by the final SET HOME. "
-            "Axis directions come from the firmware configuration (RA/DEC_INVERT_DIR).")
-        g.addWidget(note, 2, 0, 1, 4)
-        v.addWidget(box)
-
-        pa = QtWidgets.QGroupBox("AutoPA fine movement")
-        pg = QtWidgets.QHBoxLayout(pa); pg.setSpacing(6)
-        self.mini_pa_step = QtWidgets.QDoubleSpinBox(); self.mini_pa_step.setRange(0.1,10); self.mini_pa_step.setValue(1.0); self.mini_pa_step.setSuffix("′")
-        self.mini_pa_step.setMaximumWidth(80)
-        altu=QtWidgets.QPushButton("ALT ↑"); altd=QtWidgets.QPushButton("ALT ↓"); azl=QtWidgets.QPushButton("AZ ←"); azr=QtWidgets.QPushButton("AZ →")
-        altu.clicked.connect(lambda: self.move_pa(+self.mini_pa_step.value(), None))
-        altd.clicked.connect(lambda: self.move_pa(-self.mini_pa_step.value(), None))
-        azl.clicked.connect(lambda: self.move_pa(None, -self.mini_pa_step.value()))
-        azr.clicked.connect(lambda: self.move_pa(None, +self.mini_pa_step.value()))
-        pg.addWidget(QtWidgets.QLabel("Move size")); pg.addWidget(self.mini_pa_step)
-        for b in (altu, altd, azl, azr): pg.addWidget(b)
-
-        tr = QtWidgets.QGroupBox("Tracking")
+        tr = QtWidgets.QGroupBox("Tracking rate trim (:XGS# / :XSS#)")
         tg = QtWidgets.QGridLayout(tr); tg.setSpacing(6)
-        on=QtWidgets.QPushButton("ON"); off=QtWidgets.QPushButton("OFF")
-        on.clicked.connect(lambda: self.set_tracking(True)); off.clicked.connect(lambda: self.set_tracking(False))
-        tg.addWidget(on,0,0); tg.addWidget(off,0,1)
-        self.track_trim = QtWidgets.QDoubleSpinBox(); self.track_trim.setRange(0.5,1.5); self.track_trim.setDecimals(4)
-        self.track_trim.setSingleStep(0.0005); self.track_trim.setValue(1.0); self.track_trim.setMaximumWidth(100)
+        self.track_trim = QtWidgets.QDoubleSpinBox(); self.track_trim.setRange(0.5, 1.5)
+        self.track_trim.setDecimals(4); self.track_trim.setSingleStep(0.0005)
+        self.track_trim.setValue(1.0); self.track_trim.setMaximumWidth(100)
         self.track_speed_label = QtWidgets.QLabel("Tracking speed -")
         read_trim = QtWidgets.QPushButton("Read"); read_trim.clicked.connect(self.read_tracking_trim)
         save_trim = QtWidgets.QPushButton("Save"); save_trim.clicked.connect(self.save_tracking_trim)
-        tg.addWidget(QtWidgets.QLabel("Trim"),1,0); tg.addWidget(self.track_trim,1,1)
-        tg.addWidget(read_trim,1,2); tg.addWidget(save_trim,1,3)
-        tg.addWidget(self.track_speed_label,2,0,1,4)
-        bottom = QtWidgets.QHBoxLayout(); bottom.setSpacing(6)
-        bottom.addWidget(pa, 1); bottom.addWidget(tr, 0)
-        v.addLayout(bottom)
-        v.addWidget(self._hint(
-            "A global Stop (:Q#) button is not included because some firmware builds have reported hangs/crashes."))
+        tg.addWidget(QtWidgets.QLabel("Trim factor"), 0, 0); tg.addWidget(self.track_trim, 0, 1)
+        tg.addWidget(read_trim, 0, 2); tg.addWidget(save_trim, 0, 3)
+        tg.addWidget(self.track_speed_label, 1, 0, 1, 4)
+        hint = self._hint(
+            "Above 1.0 tracks faster, below 1.0 slower. Adjust only when stars drift in RA with "
+            "the polar alignment already correct, and in very small steps.")
+        tg.addWidget(hint, 2, 0, 1, 4)
+        v.addWidget(tr)
         v.addStretch(1)
         return w
 
@@ -2221,13 +2159,6 @@ class OATHelper(QtWidgets.QMainWindow):
         g.addWidget(self.axis_restore_btn,3,0,1,4)
         v.addLayout(g); v.addWidget(self.axis_start_label); v.addWidget(self.axis_result)
         self._update_axis_restore_button()
-        drift = QtWidgets.QGroupBox("Drift alignment (:XD#)")
-        dg = QtWidgets.QHBoxLayout(drift)
-        self.drift_seconds = QtWidgets.QSpinBox(); self.drift_seconds.setRange(10,600)
-        self.drift_seconds.setValue(int(self.cfg.get("drift_align_seconds",60))); self.drift_seconds.setSuffix("s")
-        self.drift_btn = QtWidgets.QPushButton("Run drift alignment"); self.drift_btn.clicked.connect(self.run_drift_alignment)
-        dg.addWidget(QtWidgets.QLabel("One-way time")); dg.addWidget(self.drift_seconds); dg.addWidget(self.drift_btn); dg.addStretch(1)
-        v.addWidget(drift)
         back=QtWidgets.QLabel("For a precise check, measure both directions with +D, -2D, +D and compare the backlash difference. This version records each run so you can repeat and compare.")
         back.setWordWrap(True); v.addWidget(back); v.addStretch(1); return w
 
@@ -2277,7 +2208,6 @@ class OATHelper(QtWidgets.QMainWindow):
             ("target_check_btn", 10900, "Target position calculation (:XGC#) requires firmware V1.9.0 or newer"),
             ("pa_home_btn", 11306, "AZ/ALT Home move requires firmware V1.13.6 or newer"),
             ("pa_zero_btn", 11306, "Saving AZ/ALT Zero requires firmware V1.13.6 or newer"),
-            ("drift_btn", 10900, "Drift alignment requires firmware V1.9.0 or newer"),
         ]
         for attr, need, reason in gates:
             widget = getattr(self, attr, None)
@@ -2387,8 +2317,9 @@ class OATHelper(QtWidgets.QMainWindow):
         label = "'down'" if which == "L" else "'up'"
         if QtWidgets.QMessageBox.question(
                 self, _("Set DEC limit"),
-                f"The current DEC position as the firmware DEC {label} limit.\n"
-                "The limits are relative to Home(0) and every later move is clamped to this range. Continue?",
+                _("The current DEC position as the firmware DEC {label} limit.\n"
+                  "The limits are relative to Home(0) and every later move is clamped to this range. "
+                  "Continue?").format(label=label),
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
             return
@@ -2515,10 +2446,11 @@ class OATHelper(QtWidgets.QMainWindow):
     def _park_confirm(self, offset):
         warn = ""
         if offset:
-            warn = (f"\n\nNote: the firmware DEC homing offset is {offset:+d} step, so after reaching Home Park "
-                    "moves DEC by that much again.")
+            warn = _("\n\nNote: the firmware DEC homing offset is {offset:+d} step, so after reaching "
+                     "Home Park moves DEC by that much again.").format(offset=offset)
         if QtWidgets.QMessageBox.question(
-                self, _("Park"), "Moves the mount to Home, parks it and stops tracking." + warn + "\n\nContinue?",
+                self, _("Park"),
+                _("Moves the mount to Home, parks it and stops tracking.") + warn + _("\n\nContinue?"),
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
             return
@@ -2570,7 +2502,30 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log(f"✓ Current position saved as the shutdown position - from Home, DEC {dec_deg:+.2f}°, RA {ra_deg:+.2f}°")
         self.run_async(job, done, lambda e: self.log(f"Failed to save the shutdown position: {e}", logging.ERROR))
 
-    def move_to_release_position(self):
+    def end_session(self):
+        """GO TO HOME, then the shutdown position - the whole nightly close-down.
+
+        Two separate buttons meant the second one got skipped, and skipping it
+        is what costs you the next session: the shutdown move is what records
+        the power-on -> Home DEC travel that 'Restore saved DEC Home' replays.
+        """
+        if not self.indi.running:
+            self.log("An INDI connection is required.", logging.WARNING); return
+        if self._motion_or_home_busy():
+            self.log("Wait for the current move to finish before ending the session.",
+                     logging.WARNING); return
+        if QtWidgets.QMessageBox.question(
+                self, _("End session"),
+                _("Move the mount to Home and then to the shutdown position, ready for power off?\n\n"
+                  "This also records the DEC travel that 'Restore saved DEC Home' replays next "
+                  "time."),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+            return
+        self.log("Ending the session: GO TO HOME, then the shutdown position.")
+        self.mini_goto_home(then=lambda: self.move_to_release_position(confirm=False))
+
+    def move_to_release_position(self, confirm=True):
         """Leave the mount in the shutdown position before power off.
 
         Powering off at Home leaves the camera's weight cantilevered on the RA
@@ -2598,27 +2553,35 @@ class OATHelper(QtWidgets.QMainWindow):
             if not (low <= dec_deg <= high):
                 QtWidgets.QMessageBox.warning(
                     self, _("Shutdown position"),
-                    f"Shutdown position DEC {dec_deg:+.1f}° is outside the firmware DEC limits ({low:+.1f}° … {high:+.1f}°).\n"
-                    "The firmware would clamp the move and stop at the wrong place. Widen the limits or reduce the angle.")
+                    _("Shutdown position DEC {dec}° is outside the firmware DEC limits "
+                      "({low}° … {high}°).\nThe firmware would clamp the move and stop at the "
+                      "wrong place. Widen the limits or reduce the angle.").format(
+                          dec=f"{dec_deg:+.1f}", low=f"{low:+.1f}", high=f"{high:+.1f}"))
                 return
 
         at_home_first = False
         # Name the direction with the button the user already knows, so the
         # sign of the field is never a guess.
         direction = _("the DEC ↓ button") if dec_deg < 0 else _("the DEC ↑ button")
-        answer = QtWidgets.QMessageBox.question(
-            self, _("Move to shutdown position"),
-            _("From Home, DEC {dec:+.1f}°, RA {ra:+.1f}°.\n"
-              "That is {amount:.1f}° in the same direction as {direction}.\n\n"
-              "Move to Home with GO TO HOME first?\n"
-              "  Yes - go to Home first, then to the shutdown position (recommended)\n"
-              "  No - move relatively from the current position").format(
-                dec=dec_deg, ra=ra_deg, amount=abs(dec_deg), direction=direction),
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
-            QtWidgets.QMessageBox.Yes)
-        if answer == QtWidgets.QMessageBox.Cancel:
-            return
-        at_home_first = (answer == QtWidgets.QMessageBox.Yes)
+        if confirm:
+            answer = QtWidgets.QMessageBox.question(
+                self, _("Move to shutdown position"),
+                _("From Home, DEC {dec:+.1f}°, RA {ra:+.1f}°.\n"
+                  "That is {amount:.1f}° in the same direction as {direction}.\n\n"
+                  "Move to Home with GO TO HOME first?\n"
+                  "  Yes - go to Home first, then to the shutdown position (recommended)\n"
+                  "  No - move relatively from the current position").format(
+                    dec=dec_deg, ra=ra_deg, amount=abs(dec_deg), direction=direction),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Yes)
+            if answer == QtWidgets.QMessageBox.Cancel:
+                return
+            at_home_first = (answer == QtWidgets.QMessageBox.Yes)
+        else:
+            # end_session() has just finished GO TO HOME, so the mount is
+            # already there: moving relatively from here is the same thing
+            # without a second home slew.
+            at_home_first = False
 
         self.cfg["release_dec_deg"] = dec_deg
         self.cfg["release_ra_deg"] = ra_deg
@@ -2658,7 +2621,8 @@ class OATHelper(QtWidgets.QMainWindow):
         def done(values):
             started_at_home, moved_dec = values
             self.dec_manual_status.setText(
-                f"✓ Shutdown position reached (DEC {dec_deg:+.1f}°). You can power off now.")
+                _("✓ Shutdown position reached (DEC {dec}°). You can power off now.").format(
+                    dec=f"{dec_deg:+.1f}"))
             self.log(f"✓ Moved to the shutdown position - from Home, DEC {dec_deg:+.1f}°, RA {ra_deg:+.1f}°. "
                      "The camera's weight no longer hangs on the RA ring when you power off.")
             if started_at_home and moved_dec:
@@ -2704,16 +2668,6 @@ class OATHelper(QtWidgets.QMainWindow):
         value = self.cfg.get("dec_home_offset_steps")
         return None if value is None else int(value)
 
-    def set_slew_rate(self, rate):
-        """Firmware slew-rate selector: S(fastest) M C G(slowest)."""
-        if not self.indi.running:
-            return
-        rate = str(rate).upper()
-        if rate not in ("S", "M", "C", "G"):
-            return
-        self.cfg["slew_rate"] = rate
-        self.meade_async(f"@R{rate}#", lambda _r: self.log(f"Slew rate: {rate} rate applied"))
-
     def read_tracking_trim(self):
         def job():
             return (str(self.indi.meade(":XGS#")).strip().rstrip("#"),
@@ -2737,33 +2691,6 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log(f"✓ Tracking trim saved: {value:.4f} (read back {readback})")
             self.read_tracking_trim()
         self.run_async(job, done, lambda e: self.log(f"Failed to save the tracking trim: {e}", logging.ERROR))
-
-    def run_drift_alignment(self):
-        """Firmware drift alignment (:XDnnn#) - blocking, east then west."""
-        if not self.indi.running:
-            self.log("An INDI connection is required.", logging.WARNING); return
-        if self._motion_or_home_busy():
-            self.log("Wait for the current move to finish.", logging.WARNING); return
-        seconds = int(self.drift_seconds.value())
-        if QtWidgets.QMessageBox.question(
-                self, _("Drift alignment"),
-                f"Runs the firmware drift alignment with a {seconds}second setting.\n"
-                f"The mount slews east, stops and slews west, taking about {2*seconds+2}seconds in total, and it cannot be interrupted.\n"
-                "Is the guide camera ready to observe the drift?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
-            return
-        self.cfg["drift_align_seconds"] = seconds
-        self.mini_motion_busy = True
-        self.log(f"Drift alignment started ({seconds}second setting, about {2*seconds+2}seconds)")
-        def job():
-            self.indi.meade(f"@XD{seconds:03d}#")
-            time.sleep(2 * seconds + 3)
-            return self._wait_for_ra_dec_idle(wait_ra=True, wait_dec=True, timeout=60.0)
-        def done(_gx):
-            self.log("✓ Drift alignment finished - correct with AutoPA according to the drift you observed.")
-        self.run_async(job, done, lambda e: self.log(f"Drift alignment failed: {e}", logging.ERROR),
-                       lambda: setattr(self, "mini_motion_busy", False))
 
     def apply_axis_calibration(self):
         """Write the measured steps/degree to the mount (:XSR# / :XSD#).
@@ -3263,90 +3190,12 @@ class OATHelper(QtWidgets.QMainWindow):
         raise TimeoutError(
             f"Mini Controller move did not finish within {timeout:.0f}s; last GX={last}")
 
-    def mini_direction_move(self, ra_direction, dec_direction):
-        """Move with the Mini Controller direction pad.
-
-        ra_direction: -1(left), 0, +1(right)
-        dec_direction: -1(down), 0, +1(up)
-        Diagonal buttons send the existing MXr/MXd relative moves back-to-back so
-        both axes can move together. RA/DEC conversion always uses live :XGR#/:XGD#.
-        """
-        if not self.indi.running:
-            self.log("An INDI connection is required.", logging.WARNING); return
-        if self.mini_motion_busy or self.home_busy or self.dec_home_move_busy or self.pa_motion_active:
-            self.log("Another move command is being processed. Press again once it finishes.", logging.WARNING); return
-        if dec_direction and self.dec_jog_busy:
-            self.log("A DEC move is being processed. Press again once it finishes.", logging.WARNING); return
-
-        ra_direction = int(ra_direction)
-        dec_direction = int(dec_direction)
-        ra_degrees = float(self.mini_ra_degrees.currentData()) * ra_direction if ra_direction else 0.0
-        dec_degrees = float(self.mini_dec_degrees.currentData()) * dec_direction if dec_direction else 0.0
-
-        self.mini_motion_busy = True
-        if dec_direction:
-            self.dec_jog_busy = True
-
-        def job():
-            gx_start = self._parse_gx(self.indi.meade(":GX#"))
-            ra_spd = None
-            ra_steps = 0
-            dec_spd = None
-            dec_motor_steps = 0
-            if ra_direction:
-                ra_spd = self._read_ra_steps_per_degree()
-                ra_steps = self._ra_steps_for_degrees(ra_degrees, ra_spd)
-                if ra_steps == 0:
-                    raise RuntimeError(
-                        f"RA {ra_degrees:+g}° converts to 0 step (XGR={ra_spd})")
-            if dec_direction:
-                dec_spd = self._read_dec_steps_per_degree()
-                user_steps = self._dec_steps_for_degrees(dec_degrees, dec_spd)
-                dec_motor_steps = user_steps
-                if dec_motor_steps == 0:
-                    raise RuntimeError(
-                        f"DEC {dec_degrees:+g}° converts to 0 step (XGD={dec_spd})")
-
-            # Existing firmware-native relative jog commands only; no new
-            # command and no :Q# are introduced here.
-            if ra_steps:
-                self.indi.meade(f"@MXr{ra_steps}#")
-            if dec_motor_steps:
-                self.indi.meade(f"@MXd{dec_motor_steps}#")
-
-            gx_end = self._wait_for_ra_dec_idle(
-                wait_ra=bool(ra_steps), wait_dec=bool(dec_motor_steps), timeout=90.0)
-            return gx_start, gx_end, ra_degrees, ra_steps, ra_spd, dec_degrees, dec_motor_steps, dec_spd
-
-        def done(values):
-            gx_start, gx_end, rd, rs, rspd, dd, ds, dspd = values
-            labels=[]
-            if rs:
-                labels.append(f"RA {'←' if rd < 0 else '→'} {abs(rd):g}°")
-            if ds:
-                labels.append(f"DEC {'↑' if dd > 0 else '↓'} {abs(dd):g}°")
-            self.log("Mini Controller: " + " + ".join(labels))
-            self.logger.debug(
-                "Mini pad move: RA=%+.3f deg/%+d motor step XGR=%s, "
-                "DEC=%+.3f deg/%+d motor step XGD=%s, "
-                "GX RA %+d->%+d DEC %+d->%+d",
-                rd, rs, f"{rspd:.9f}" if rspd is not None else "-",
-                dd, ds, f"{dspd:.9f}" if dspd is not None else "-",
-                gx_start["ra_steps"], gx_end["ra_steps"],
-                gx_start["dec_steps"], gx_end["dec_steps"])
-
-        def err(message):
-            self.log(f"Mini Controller move failed: {message}", logging.ERROR)
-
-        def finished():
-            self.mini_motion_busy = False
-            if dec_direction:
-                self.dec_jog_busy = False
-
-        self.run_async(job, done, err, finished)
-
-    def mini_goto_home(self):
+    def mini_goto_home(self, then=None):
         """Use firmware Go To Home for the final RA/DEC logical Home.
+
+        `then` is called once the move has finished successfully and the busy
+        flag has been cleared, so the shutdown move can follow without tripping
+        its own "wait for the current move" guard.
 
         The final Home is established once, after RA AutoHome and manual DEC
         adjustment, with firmware Set Home (:SHP#).  Therefore the firmware's
@@ -3377,8 +3226,11 @@ class OATHelper(QtWidgets.QMainWindow):
                     "Check in Diagnostics whether SET HOME cleared the offset to zero.)")
             return gx_start, gx_end
 
+        reached_home = {"ok": False}
+
         def done(values):
             gx_start, gx_end = values
+            reached_home["ok"] = True
             self.log("✓ Mini HOME done - firmware Go To Home (:hF#)")
             self.logger.debug(
                 "Mini HOME via hF: RA %+d->%+d DEC %+d->%+d",
@@ -3390,36 +3242,12 @@ class OATHelper(QtWidgets.QMainWindow):
 
         def finished():
             self.dec_home_move_busy = False
+            # Chain only after the flag is cleared: a QPushButton.clicked passes
+            # a bool, so callable() also keeps a plain connect() harmless.
+            if reached_home["ok"] and callable(then):
+                QtCore.QTimer.singleShot(0, then)
 
         self.run_async(job, done, err, finished)
-
-    def keyPressEvent(self, event):
-        """Keyboard slewing while the Mini Controller tab is in front.
-
-        Arrow keys drive RA/DEC and WASD drives ALT/AZ.
-        """
-        handled = False
-        if hasattr(self, "tabs") and self.tabs.currentWidget() is getattr(self, "mini_tab", None):
-            key = event.key()
-            step = float(self.mini_pa_step.value())
-            if key == QtCore.Qt.Key_Left:
-                self.mini_direction_move(-1, 0); handled = True
-            elif key == QtCore.Qt.Key_Right:
-                self.mini_direction_move(+1, 0); handled = True
-            elif key == QtCore.Qt.Key_Up:
-                self.mini_direction_move(0, +1); handled = True
-            elif key == QtCore.Qt.Key_Down:
-                self.mini_direction_move(0, -1); handled = True
-            elif key == QtCore.Qt.Key_W:
-                self.move_pa(+step, None); handled = True
-            elif key == QtCore.Qt.Key_S:
-                self.move_pa(-step, None); handled = True
-            elif key == QtCore.Qt.Key_A:
-                self.move_pa(None, -step); handled = True
-            elif key == QtCore.Qt.Key_D:
-                self.move_pa(None, +step); handled = True
-        if not handled:
-            super().keyPressEvent(event)
 
     @staticmethod
     def _gx_is_tracking(gx):
@@ -3780,7 +3608,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if norm in ("ok", "idle"):
             # Do not complete from state alone. The periodic :GX# poll cross-checks
             # that the corresponding motor is actually stopped.
-            self.pa_status.setText(f"AutoPA {self.pa_active_axis} Checking status")
+            self.pa_status.setText(_("AutoPA {axis} Checking status").format(axis=self.pa_active_axis))
 
     def check_oat_properties(self, attempt=0):
         if not self.indi.running:
@@ -3796,7 +3624,7 @@ class OATHelper(QtWidgets.QMainWindow):
             return
         if missing:
             self.log("Missing OAT INDI properties: " + ", ".join(missing) + f". Current device={self.indi.device!r}. "
-                     "If Diagnostics still works, this is only a property-discovery mismatch; OAT Tools will keep retrying.", logging.WARNING)
+                     "If Diagnostics still works, this is only a property-discovery mismatch; OAT Helper will keep retrying.", logging.WARNING)
         else:
             self.log(f"LX200 OpenAstroTech properties detected: "
                      f"Meade={self.indi.meade_vector}.{self.indi.meade_element}, "
@@ -4000,7 +3828,7 @@ class OATHelper(QtWidgets.QMainWindow):
                     logging.WARNING)
             if self.dec_manual_active:
                 self.dec_manual_status.setText(
-                    "Adjusting - press 'SET HOME' once DEC is at its real Home position.")
+                    _("Adjusting - press 'SET HOME' once DEC is at its real Home position."))
             self.log(f"{source}: DEC {'↑' if user_degrees>0 else '↓'} {abs(user_degrees):g}° move sent")
             self.logger.debug(
                 "%s DEC jog: user=%+.3f deg, XGD=%.9f step/deg, motor=%+d step, GX %+d -> %+d",
@@ -4029,7 +3857,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self.dec_manual_active = True
         self.wizard_dec_done = False
         if hasattr(self, "dec_manual_status"):
-            self.dec_manual_status.setText(text or "Fine-adjusting - press SET HOME once the position is right.")
+            self.dec_manual_status.setText(text or _("Fine-adjusting - press SET HOME once the position is right."))
         self.update_wizard_status()
 
     def home_ra_jog_move(self, user_degrees):
@@ -4310,10 +4138,10 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log("DEC has already moved or been reset in this session. Restoring is only possible right after power-on (or right after a reconnect).", logging.WARNING); return
         ans = QtWidgets.QMessageBox.Yes if not confirm else QtWidgets.QMessageBox.question(
             self, _("Restore DEC Home"),
-            "This re-applies the 'power-on position -> Home' DEC travel recorded at the last SET HOME, then runs SET HOME.\n\n"
-            f"Move size: {off:+d} step\n\n"
-            "Use this only when DEC is at the same physical position as at the last power-on (parked, for example). "
-            "A different position would set a wrong Home.\n\nContinue?",
+            _("This re-applies the 'power-on position -> Home' DEC travel recorded at the last SET HOME, "
+              "then runs SET HOME.\n\nMove size: {steps:+d} step\n\nUse this only when DEC is at the same "
+              "physical position as at the last power-on (parked, for example). A different position would "
+              "set a wrong Home.\n\nContinue?").format(steps=off),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
         if ans != QtWidgets.QMessageBox.Yes:
             return
@@ -4729,7 +4557,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 self.pa_fallback_poll.start()
             else:
                 raise RuntimeError(f"No AutoPA control property for {axis}")
-            self.pa_status.setText(f"AutoPA {axis} command sent")
+            self.pa_status.setText(_("AutoPA {axis} command sent").format(axis=axis))
         except Exception as exc:
             self._abort_pa_motion(f"{axis} move failed: {exc}")
 
@@ -4761,7 +4589,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 self.pa_gx_seen_moving = True
                 self.pa_seen_busy = True
                 self.pa_ack_timer.stop()
-                self.pa_status.setText(f"AutoPA {axis} moving (GX confirmed)")
+                self.pa_status.setText(_("AutoPA {axis} moving (GX confirmed)").format(axis=axis))
                 return
             elapsed = time.monotonic() - self.pa_axis_started_at
             vector_present = bool(self._pa_axis_vector(axis))
@@ -4833,6 +4661,12 @@ class OATHelper(QtWidgets.QMainWindow):
             self.pa_status.setText(_("AutoPA move complete"))
 
     def _abort_pa_motion(self, reason):
+        # Arm the settle window here too. An abort means an axis may have moved
+        # an unknown amount, so the next image - captured before it - is exactly
+        # the one that must not be trusted; _finish_pa_motion stamps this and
+        # leaving it None here made the settle window inert on aborts only.
+        if self.pa_move_source == "auto":
+            self.autopa_adjustment_finished = datetime.now()
         self.pa_motion_active = False
         self.pa_active_axis = None
         self.pa_move_queue = []
@@ -4857,7 +4691,7 @@ class OATHelper(QtWidgets.QMainWindow):
     def read_pa_position(self):
         def done(result):
             p = result.split("|")
-            if len(p)>=2: self.pa_pos.setText(f"AZ: {p[0].strip()} step | ALT: {p[1].strip()} step")
+            if len(p)>=2: self.pa_pos.setText(_("AZ: {az} step | ALT: {alt} step").format(az=p[0].strip(), alt=p[1].strip()))
             self.log(f"AutoPA positions: {result}")
         self.meade_async(":XGAA#", done)
 
@@ -5165,10 +4999,43 @@ class OATHelper(QtWidgets.QMainWindow):
         self.autopa_running=True; self.autopa_busy=False; self.autopa_was_moving=False
         self.autopa_seen_solution=False
         self.autopa_prev_error_arcmin=None; self.autopa_worse_count=0
-        self.autopa_last_entry=datetime.now(); self.autopa_adjustment_finished=datetime.now()
+        self.autopa_last_entry=datetime.now(); self.autopa_adjustment_finished=None
         self.paa_offsets = {}
         self.paa_last_match = None
         self.autopa_last_signature = None
+        # Run-scoped like the fields above: keeping run 1's residuals made the
+        # per-axis check compare run 2's first solution against a different
+        # pointing and advise reflashing a correctly-wired axis.
+        self.paa_pending_move = None
+        # Floor for the run: a PAA Refresh older than the button press describes
+        # a different mount pose. This used to be autopa_adjustment_finished.
+        self.autopa_started_at = datetime.now()
+        self._paa_skew_warned = False
+        self.paa_deferred = None
+        self._dbus_quiet_warned = False
+        self._warn_az_sign_change_once()
+
+        # Prefer the direct connection: Ekos pushes the value the moment it has
+        # it, so there is no file, no logging setting to get wrong and no
+        # timestamp to parse. Falls back to the log file when the bus, QtDBus or
+        # the Align interface is missing.
+        if self._start_paa_dbus():
+            self.pa_status.setText(_("Waiting for a PAA measurement (D-Bus)"))
+            self.paa_source_label.setText(_("D-Bus"))
+            # The timer still runs: in D-Bus mode it retries a deferred
+            # correction and notices when Ekos has gone quiet. It never scans
+            # the log, so the two sources cannot both consume a measurement.
+            self._dbus_last_paa = datetime.now()
+            self.autopa_timer.start()
+            self.wizard_pa_done = False
+            self.update_wizard_status()
+            self.log(f"AutoPA watcher started. Accuracy={self.accuracy.value():.0f} arcsec, "
+                     f"max/cycle={self.max_move.value():.1f} arcmin, "
+                     f"settle={self.autopa_settle.value()} s")
+            return
+
+        self.paa_source = "logfile"
+        self.paa_source_label.setText(_("log file"))
         self.pa_status.setText(_("Checking the log..."))
 
         # The baseline scan touches several log files; keep it off the GUI
@@ -5186,7 +5053,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 self.log(f"Baseline: the existing PAA Refresh ({baseline[1]:%H:%M:%S}) is ignored; processing starts from the next Refresh.")
             else:
                 self.log("No previous PAA Refresh record. Processing starts as soon as you begin Refresh in Ekos.")
-            self.pa_status.setText(_("Waiting for the PAA log") if ok else "Ekos file logging needs checking")
+            self.pa_status.setText(_("Waiting for the PAA log") if ok else _("Ekos file logging needs checking"))
             self.autopa_timer.start()
 
         self.run_async(baseline_job, baseline_done,
@@ -5196,153 +5063,400 @@ class OATHelper(QtWidgets.QMainWindow):
         self.update_wizard_status()
         self.log(f"AutoPA watcher started. Accuracy={self.accuracy.value():.0f} arcsec, max/cycle={self.max_move.value():.1f} arcmin")
 
+    def _stop_paa_dbus(self):
+        """Drop the newLog subscription so the source can be changed at runtime."""
+        if not self._dbus_connected:
+            return
+        try:
+            from PyQt5.QtDBus import QDBusConnection
+            QDBusConnection.sessionBus().disconnect(
+                self.DBUS_SERVICE, self.DBUS_PATH, self.DBUS_INTERFACE,
+                "newLog", self._on_ekos_align_log)
+        except Exception as exc:
+            self.logger.debug("D-Bus unsubscribe failed: %s", exc)
+        self._dbus_connected = False
+        self.paa_source = "logfile"
+
     def stop_autopa_watch(self):
         self.autopa_timer.stop(); self.autopa_running=False; self.autopa_busy=False
+        self._stop_paa_dbus()
         if not self.pa_motion_active:
-            self.pa_status.setText(_("Done") if self.wizard_pa_done else "Stopped")
+            self.pa_status.setText(_("Done") if self.wizard_pa_done else _("Stopped"))
         self.update_wizard_status()
         self.log("AutoPA watcher stopped." if not self.wizard_pa_done else "AutoPA watcher stopped after successful polar alignment.")
 
     def autopa_tick(self):
+        """Poll the Ekos log. Only runs when the D-Bus source is unavailable."""
         if not self.autopa_running or self.autopa_busy or self.pa_motion_active:
+            return
+        if self.paa_source == "dbus":
+            # Never scan the log here: two sources would deliver the same
+            # measurement under two signatures and correct twice - the exact
+            # failure this watcher exists to prevent.
+            self._dbus_housekeeping()
             return
         self.autopa_busy=True
 
         def job():
             return self.latest_ekos_paa()
 
-        def status_done(sol):
-            if not sol:
-                waited = (datetime.now() - self.autopa_last_entry).total_seconds() if self.autopa_last_entry else 0
-                self.pa_status.setText(_("No PAA log value"))
-                if waited > 60 and not getattr(self, "_paa_wait_warned", False):
-                    self._paa_wait_warned = True
-                    self.log("No PAA Refresh line has been found for 60 seconds. Use 'Diagnose PAA log' on the AutoPA tab to "
-                             "check Ekos file logging and the log path.", logging.WARNING)
-                self.autopa_busy=False; return
-            self._paa_wait_warned = False
-            signature,ts,az_deg,alt_deg,fp,line=sol
-            if signature == self.autopa_last_signature:
-                self.logger.debug("AutoPA waiting: latest PAA Refresh signature unchanged (%s)", signature)
-                self.autopa_busy=False; return
-            previous_signature = self.autopa_last_signature
-            self.autopa_last_signature = signature
-            if self.wait_two.isChecked() and not getattr(self, "autopa_seen_solution", False):
-                # Wait for a second error calculation before moving anything;
-                # the first solve after a slew is the noisiest.
-                self.autopa_seen_solution = True
-                self.pa_status.setText(_("Waiting for two measurements (1/2)"))
-                self.log("The first PAA solution is used as a reference only. Correction starts from the next Refresh.")
-                self.autopa_busy = False
-                return
-            # An Ekos capture+solve takes ~25 s, so the refresh line that
-            # appears right after a correction was usually measured *before*
-            # it. Acting on it applies the same correction twice: the axis
-            # overshoots to the mirror image of the error, the next cycle
-            # corrects back, and the run oscillates forever while the
-            # "residual increased" guard blames the motor direction.
-            finished = getattr(self, "autopa_adjustment_finished", None)
-            if finished is not None and ts <= finished + timedelta(seconds=1):
-                self.pa_status.setText(_("Waiting for a measurement taken after the correction"))
-                self.log(f"Ignoring a PAA solution measured at {ts.strftime('%H:%M:%S')}, before the last "
-                         f"correction finished at {finished.strftime('%H:%M:%S')}. Waiting for the next Refresh.")
-                self.autopa_busy = False
-                return
-
-            self.autopa_last_entry = ts
-            self.log(f"New PAA Refresh accepted: {Path(fp).name} @ {ts.strftime('%H:%M:%S.%f')[:-3]}")
-            self.logger.debug("PAA source line: %s", line)
-
-            raw_alt = alt_deg * 60.0
-            raw_az = az_deg * 60.0
-            # Offsets are treated as the desired PAA residual/bias.  Therefore
-            # convergence and movement use (measured - configured offset).
-            residual_alt = raw_alt - self.alt_offset.value()
-            residual_az = raw_az - self.az_offset.value()
-            residual_total = math.hypot(residual_alt, residual_az)
-            measured_total = math.hypot(raw_alt, raw_az)
-
-            alt_move = -residual_alt
-            az_move = +residual_az
-
-            self.log(
-                f"PAA solution: az={az_deg:.6f}° ({raw_az:+.3f}′), "
-                f"alt={alt_deg:.6f}° ({raw_alt:+.3f}′), measured={measured_total:.3f}′, "
-                f"target residual={residual_total:.3f}′ -> move ALT={alt_move:+.3f}′ AZ={az_move:+.3f}′"
-            )
-
-            # Per-axis direction check: after a correction, an axis whose error
-            # grew instead of shrinking is almost always inverted.  Naming the
-            # axis is far more useful than a generic "error increased".
-            pending = self.paa_pending_move
-            if pending:
-                prev_alt, prev_az, moved_alt, moved_az = pending
-                self.paa_pending_move = None
-                for name, before, after, moved in (
-                        ("ALT", prev_alt, residual_alt, moved_alt),
-                        ("AZ", prev_az, residual_az, moved_az)):
-                    if abs(moved) < 0.05:
-                        continue
-                    if abs(after) > abs(before) + max(0.2, abs(before) * 0.1):
-                        self.log(
-                            f"{name} error grew from {abs(before):.2f}′ to {abs(after):.2f}′ after a "
-                            f"{moved:+.2f}′ move, so that axis most likely runs backwards. Set "
-                            f"{name}_INVERT_DIR in Configuration_local.hpp and reflash.", logging.WARNING)
-
-            # Direction / runaway guard: stop after two consecutive meaningful
-            # increases.  Ignore small solver noise (>=0.25' or 10%).
-            prev = self.autopa_prev_error_arcmin
-            if prev is not None:
-                margin = max(0.25, prev * 0.10)
-                if residual_total > prev + margin:
-                    self.autopa_worse_count += 1
-                    self.log(
-                        f"AutoPA residual increased {prev:.3f}′ -> {residual_total:.3f}′ "
-                        f"({self.autopa_worse_count}/2).",
-                        logging.WARNING)
-                elif residual_total < prev:
-                    self.autopa_worse_count = 0
-            self.autopa_prev_error_arcmin = residual_total
-
-            if self.autopa_worse_count >= 2:
-                self.pa_status.setText(_("Error grew - stopped automatically"))
-                self.log("AutoPA stopped: PAA error increased twice. Check ALT/AZ direction inversion before retrying.", logging.ERROR)
-                self.stop_autopa_watch(); return
-
-            target=self.accuracy.value()/60.0
-            if residual_total <= target:
-                self.wizard_pa_done = True
-                self.pa_status.setText(f"Done: {residual_total*60:.0f}″")
-                self.log(f"✓ Polar alignment within target: residual {residual_total*60:.0f} arcsec")
-                self.update_wizard_status()
-                self.stop_autopa_watch(); return
-
-            lim=self.max_move.value()
-            if abs(alt_move)>lim or abs(az_move)>lim:
-                self.pa_status.setText(_("Safety limit exceeded"))
-                # Refusing outright made the first correction impossible - the
-                # initial error is legitimately large - and pushed people to
-                # raise the limit until it no longer protected anything. Move
-                # by the limit instead and let the next cycle continue.
-                alt_move = max(-lim, min(lim, alt_move))
-                az_move = max(-lim, min(lim, az_move))
-                self.log(f"Correction larger than the {lim:.1f}′ per-axis limit; moving "
-                         f"ALT {alt_move:+.1f}′ / AZ {az_move:+.1f}′ this cycle and continuing.",
-                         logging.WARNING)
-
-            if self.move_pa(alt_move,az_move,source="auto"):
-                self.pa_status.setText(f"Correcting ALT {alt_move:+.2f}′ → AZ {az_move:+.2f}′")
-                self.paa_pending_move = (residual_alt, residual_az, alt_move, az_move)
-            else:
-                # The move was rejected (axis busy, mount disconnected, ...).
-                # Do not swallow this solution: retry it on the next tick.
-                self.autopa_last_signature = previous_signature
-                self.pa_status.setText(_("AutoPA move pending"))
-            self.autopa_busy=False
-
         def err(e):
             self.log(f"AutoPA watcher error: {e}", logging.ERROR); self.autopa_busy=False
-        self.run_async(job,status_done,err)
+        self.run_async(job, self._apply_paa_solution, err)
+
+    def _apply_paa_solution(self, sol):
+        """Decide and issue the correction for one PAA solution.
+
+        Shared by both sources: the polled log file and the pushed D-Bus
+        signal. Every guard lives here so neither path can skip one.
+        """
+        # A QRunnable cannot be cancelled, so the log scan queued before Stop
+        # still lands here afterwards. Without this the mount moved after the
+        # user had stopped the watcher - or after an emergency stop.
+        if not self.autopa_running:
+            self.autopa_busy = False
+            return
+        if not sol:
+            waited = (datetime.now() - self.autopa_last_entry).total_seconds() if self.autopa_last_entry else 0
+            self.pa_status.setText(_("No PAA log value"))
+            if waited > 60 and not getattr(self, "_paa_wait_warned", False):
+                self._paa_wait_warned = True
+                self.log("No PAA Refresh line has been found for 60 seconds. Use 'Diagnose PAA log' on the AutoPA tab to "
+                         "check Ekos file logging and the log path.", logging.WARNING)
+            self.autopa_busy=False; return
+        self._paa_wait_warned = False
+        signature,ts,az_deg,alt_deg,fp,line=sol
+        if signature == self.autopa_last_signature:
+            self.logger.debug("AutoPA waiting: latest PAA Refresh signature unchanged (%s)", signature)
+            self.autopa_busy=False; return
+        previous_signature = self.autopa_last_signature
+        self.autopa_last_signature = signature
+        if self.wait_two.isChecked() and not getattr(self, "autopa_seen_solution", False):
+            # Wait for a second error calculation before moving anything;
+            # the first solve after a slew is the noisiest.
+            self.autopa_seen_solution = True
+            self.pa_status.setText(_("Waiting for two measurements (1/2)"))
+            self.log("The first PAA solution is used as a reference only. Correction starts from the next Refresh.")
+            self.autopa_busy = False
+            return
+        # An Ekos capture+solve takes ~25 s, so the refresh line that
+        # appears right after a correction was usually measured *before*
+        # it. Acting on it applies the same correction twice: the axis
+        # overshoots to the mirror image of the error, the next cycle
+        # corrects back, and the run oscillates forever while the
+        # "residual increased" guard blames the motor direction.
+        finished = getattr(self, "autopa_adjustment_finished", None)
+        settle = max(1.0, float(self.autopa_settle.value()))
+        arrived = datetime.now()
+
+        # The settle window is measured in arrival time on this machine. It
+        # always meant "has a full capture+solve happened since the move?", and
+        # comparing it against a timestamp parsed out of the log made it hostage
+        # to the log-writing machine's clock: a clock that lags by more than the
+        # settle value stalled the run permanently.
+        if finished is not None and arrived <= finished + timedelta(seconds=settle):
+            self.pa_status.setText(_("Waiting for a measurement taken after the correction"))
+            waited = (arrived - finished).total_seconds()
+            self.log(f"Ignoring a PAA solution (logged {ts.strftime('%H:%M:%S')}) that arrived "
+                     f"{waited:.0f}s after the correction finished at "
+                     f"{finished.strftime('%H:%M:%S')}: still settling ({settle:.0f}s). Ekos logs a "
+                     f"solve about 25 s after the shutter opened, so this image was taken before "
+                     f"the move. Waiting for the next Refresh.")
+            self.autopa_busy = False
+            return
+
+        # Secondary checks that read the line's own timestamp. Only trust it
+        # while the log clock is demonstrably in step with this one; a shared or
+        # remote log directory can be minutes out, and then these would reject
+        # every solution forever.
+        skew = abs((arrived - ts).total_seconds())
+        if skew <= self.PAA_CLOCK_TRUST_SECONDS:
+            if finished is not None and ts <= finished:
+                self.pa_status.setText(_("Waiting for a measurement taken after the correction"))
+                self.log(f"Ignoring a PAA solution logged at {ts.strftime('%H:%M:%S')}: it was "
+                         f"measured before the correction that finished at "
+                         f"{finished.strftime('%H:%M:%S')}. Waiting for the next Refresh.")
+                self.autopa_busy = False
+                return
+            started = getattr(self, "autopa_started_at", None)
+            if started is not None and ts < started:
+                self.pa_status.setText(_("Waiting for a new measurement"))
+                self.log(f"Ignoring a PAA solution logged at {ts.strftime('%H:%M:%S')}: it predates "
+                         f"the start of this run ({started.strftime('%H:%M:%S')}), so it describes a "
+                         f"different mount pose. Waiting for the next Refresh.")
+                self.autopa_busy = False
+                return
+        elif not getattr(self, "_paa_skew_warned", False):
+            self._paa_skew_warned = True
+            self.log(f"The Ekos log clock is {skew / 60.0:.1f} min away from this machine's clock, so "
+                     f"PAA line timestamps are not used for ordering; the settle window still applies.",
+                     logging.WARNING)
+
+        self.autopa_last_entry = ts
+        self.log(f"New PAA Refresh accepted: {Path(fp).name} @ {ts.strftime('%H:%M:%S.%f')[:-3]}")
+        self.logger.debug("PAA source line: %s", line)
+
+        raw_alt = alt_deg * 60.0
+        raw_az = az_deg * 60.0
+        # Offsets are treated as the desired PAA residual/bias.  Therefore
+        # convergence and movement use (measured - configured offset).
+        residual_alt = raw_alt - self.alt_offset.value()
+        residual_az = raw_az - self.az_offset.value()
+        residual_total = math.hypot(residual_alt, residual_az)
+        measured_total = math.hypot(raw_alt, raw_az)
+
+        # Both axes correct *against* the error. KStars documents the PAA
+        # error signs as correction directions (ekos/align/polaralign.h:
+        # "positive altitude error: reduce altitude, positive azimuth
+        # error: point telescope more to the left"), and the logged
+        # "Corrected az/alt" is the remaining error, not the applied move.
+        # Physical motor reversal belongs in ALT_INVERT_DIR / AZ_INVERT_DIR
+        # in the firmware's Configuration_local.hpp, never here: 0.6.0
+        # removed the "Invert AZ correction" checkbox but left AZ
+        # un-inverted, so AZ was driven away from the pole every cycle.
+        alt_move = -residual_alt
+        az_move = -residual_az
+
+        self.log(
+            f"PAA solution: az={az_deg:.6f}° ({raw_az:+.3f}′), "
+            f"alt={alt_deg:.6f}° ({raw_alt:+.3f}′), measured={measured_total:.3f}′, "
+            f"target residual={residual_total:.3f}′ -> move ALT={alt_move:+.3f}′ AZ={az_move:+.3f}′"
+        )
+
+        # Per-axis direction check: after a correction, an axis whose error
+        # grew instead of shrinking is almost always inverted.  Naming the
+        # axis is far more useful than a generic "error increased".
+        pending = self.paa_pending_move
+        if pending:
+            prev_alt, prev_az, moved_alt, moved_az = pending
+            self.paa_pending_move = None
+            for name, before, after, moved in (
+                    ("ALT", prev_alt, residual_alt, moved_alt),
+                    ("AZ", prev_az, residual_az, moved_az)):
+                if abs(moved) < 0.05:
+                    continue
+                if abs(after) > abs(before) + max(0.2, abs(before) * 0.1):
+                    self.log(
+                        f"{name} error grew from {abs(before):.2f}′ to {abs(after):.2f}′ after a "
+                        f"{moved:+.2f}′ move, so that axis most likely runs backwards. Set "
+                        f"{name}_INVERT_DIR in Configuration_local.hpp and reflash - but if you "
+                        f"already set it to work around the AZ direction bug in 0.6.4-0.6.6, "
+                        f"revert it instead: {VERSION} fixed that in the tool.", logging.WARNING)
+
+        # Direction / runaway guard: stop after two consecutive meaningful
+        # increases.  Ignore small solver noise (>=0.25' or 10%).
+        prev = self.autopa_prev_error_arcmin
+        if prev is not None:
+            margin = max(0.25, prev * 0.10)
+            if residual_total > prev + margin:
+                self.autopa_worse_count += 1
+                self.log(
+                    f"AutoPA residual increased {prev:.3f}′ -> {residual_total:.3f}′ "
+                    f"({self.autopa_worse_count}/2).",
+                    logging.WARNING)
+            elif residual_total < prev:
+                self.autopa_worse_count = 0
+        self.autopa_prev_error_arcmin = residual_total
+
+        if self.autopa_worse_count >= 2:
+            self.pa_status.setText(_("Error grew - stopped automatically"))
+            self.log("AutoPA stopped: PAA error increased twice. Check ALT/AZ direction inversion before retrying.", logging.ERROR)
+            self.stop_autopa_watch(); return
+
+        target=self.accuracy.value()/60.0
+        if residual_total <= target:
+            self.wizard_pa_done = True
+            self.pa_status.setText(f"Done: {residual_total*60:.0f}″")
+            self.log(f"✓ Polar alignment within target: residual {residual_total*60:.0f} arcsec")
+            # The ALT/AZ moves changed the mount axes relative to the guide
+            # camera, so a calibration measured before this run no longer
+            # describes the geometry. Ekos reuses a stored calibration by
+            # default, so nothing else will say this.
+            self.log("Polar alignment changed during this run. Recalibrate guiding in Ekos before "
+                     "imaging - a calibration measured before the correction no longer matches the "
+                     "axes.", logging.WARNING)
+            self.update_wizard_status()
+            self.stop_autopa_watch(); return
+
+        lim=self.max_move.value()
+        if abs(alt_move)>lim or abs(az_move)>lim:
+            self.pa_status.setText(_("Safety limit exceeded"))
+            # Refusing outright made the first correction impossible - the
+            # initial error is legitimately large - and pushed people to
+            # raise the limit until it no longer protected anything. Move
+            # by the limit instead and let the next cycle continue.
+            alt_move = max(-lim, min(lim, alt_move))
+            az_move = max(-lim, min(lim, az_move))
+            self.log(f"Correction larger than the {lim:.1f}′ per-axis limit; moving "
+                     f"ALT {alt_move:+.1f}′ / AZ {az_move:+.1f}′ this cycle and continuing.",
+                     logging.WARNING)
+
+        if self.move_pa(alt_move,az_move,source="auto"):
+            self.paa_deferred = None
+            self.pa_status.setText(_("Correcting ALT {alt}′ → AZ {az}′").format(
+                alt=f"{alt_move:+.2f}", az=f"{az_move:+.2f}"))
+            self.paa_pending_move = (residual_alt, residual_az, alt_move, az_move)
+        else:
+            # The move was rejected (axis busy, mount disconnected, ...).
+            # Do not swallow this solution: retry it on the next tick. The
+            # poller would re-read the same line from its cache, but a pushed
+            # D-Bus solution is gone once dropped, so hold on to it.
+            self.autopa_last_signature = previous_signature
+            self.paa_deferred = sol
+            self.pa_status.setText(_("AutoPA move pending"))
+        self.autopa_busy=False
+
+    # ------------------------ Ekos PAA over D-Bus ------------------------
+    # KStars registers the Align module at /KStars/Ekos/Align, and its interface
+    # org.kde.kstars.Ekos.Align exports exactly three signals: newStatus,
+    # newSolution and newLog(QString).  polarResultUpdated and
+    # updatedErrorsChanged live on PolarAlignmentAssistant, a plain QObject that
+    # is never put on the bus, so newLog is the only way to receive the PAA
+    # numbers - the same text the log file carries, without the file.
+    # How far the Ekos log clock may be from this machine's before its
+    # timestamps stop being used for ordering. A capture+solve is tens of
+    # seconds, so anything past a few minutes is a clock difference, not latency.
+    PAA_CLOCK_TRUST_SECONDS = 300.0
+
+    # How long the D-Bus source may stay silent before saying so. Ekos pushes a
+    # Refresh every capture+solve, so minutes of silence means it stopped.
+    DBUS_QUIET_WARN_SECONDS = 180.0
+
+    DBUS_SERVICE = "org.kde.kstars"
+    DBUS_PATH = "/KStars/Ekos/Align"
+    DBUS_INTERFACE = "org.kde.kstars.Ekos.Align"
+
+    def _start_paa_dbus(self):
+        """Subscribe to Ekos' Align log signal. True when connected."""
+        # Read the setting BEFORE the latch: checking the latch first made
+        # "Ekos log file only" inert for the rest of the process once a single
+        # run had connected, while the "In use" label still claimed D-Bus.
+        if str(self.cfg.get("paa_source", "auto")).lower() == "logfile":
+            self._stop_paa_dbus()
+            return False
+        if self._dbus_connected:
+            return True
+        # Any failure here must fall back to the log file, never propagate: this
+        # runs from the Start handler with autopa_running already True, and an
+        # escaping exception left a watcher that reported itself running with no
+        # timer and no subscription.
+        try:
+            return self._subscribe_paa_dbus()
+        except ImportError:
+            self.log("PyQt5.QtDBus is not available, so the Ekos PAA values are read from the log "
+                     "file instead. It normally ships inside the python3-pyqt5 package.")
+        except Exception as exc:
+            self.log(f"Could not use the KStars D-Bus interface ({exc}); the Ekos PAA values are "
+                     f"read from the log file instead.", logging.WARNING)
+        return False
+
+    def _subscribe_paa_dbus(self):
+        from PyQt5.QtDBus import QDBusConnection
+
+        bus = QDBusConnection.sessionBus()
+        if not bus.isConnected():
+            self.log("No D-Bus session bus here, so the Ekos PAA values are read from the log file.")
+            return False
+        # Ask the bus daemon whether KStars is on the bus, NOT KStars itself.
+        # QDBusInterface's constructor introspects the target with a 25 s reply
+        # timeout, and KStars is single-threaded: pressing Start mid plate-solve
+        # froze the window for up to that long with no Stop button. The bus
+        # daemon always answers immediately.
+        daemon = bus.interface()
+        if daemon is not None and not daemon.isServiceRegistered(self.DBUS_SERVICE).value():
+            self.log("KStars is not on the session bus, so the Ekos PAA values are read from the "
+                     "log file.")
+            return False
+        if not bus.connect(self.DBUS_SERVICE, self.DBUS_PATH, self.DBUS_INTERFACE,
+                           "newLog", self._on_ekos_align_log):
+            self.log("Could not subscribe to the Ekos Align newLog D-Bus signal; using the log file.",
+                     logging.WARNING)
+            return False
+        self._dbus_connected = True
+        self.paa_source = "dbus"
+        self.log("Reading the Ekos PAA values straight from KStars over D-Bus "
+                 "(org.kde.kstars.Ekos.Align.newLog): no log file, no file-logging setting, and the "
+                 "measurement time is the moment Ekos computed it.")
+        return True
+
+    def _warn_az_sign_change_once(self):
+        """Tell anyone who reflashed AZ_INVERT_DIR to work around the old bug.
+
+        0.6.4-0.6.6 drove AZ away from the pole and, when the error grew,
+        advised setting AZ_INVERT_DIR. Anyone who followed that compensated a
+        tool-side bug in the firmware, so after the sign fix their mount is
+        inverted twice: it drives away from the pole for two full cycles -
+        each longer now because of the settle window - before the runaway
+        guard stops the run.
+        """
+        if self.cfg.get("az_sign_notice_version") == VERSION:
+            return
+        self.cfg["az_sign_notice_version"] = VERSION
+        self.log(
+            f"AutoPA AZ direction changed in {VERSION}: AZ is now corrected against the measured "
+            f"offset, the same way ALT always was. Earlier versions drove it the other way and, "
+            f"when the residual grew, advised setting AZ_INVERT_DIR in Configuration_local.hpp. If "
+            f"you set that as a workaround, revert it and reflash - otherwise the axis is inverted "
+            f"twice and will move away from the pole. Watch the first AZ correction of this run.",
+            logging.WARNING)
+
+    def _dbus_housekeeping(self):
+        """Retry a deferred correction, and notice when Ekos has gone quiet."""
+        deferred = getattr(self, "paa_deferred", None)
+        if deferred is not None:
+            self.paa_deferred = None
+            # Re-offer it: _apply_paa_solution re-runs every guard, and will
+            # defer it again if the axis is still busy.
+            self.autopa_last_signature = None
+            self._apply_paa_solution(deferred)
+            return
+        last = getattr(self, "_dbus_last_paa", None)
+        if last is None:
+            return
+        quiet = (datetime.now() - last).total_seconds()
+        if quiet > self.DBUS_QUIET_WARN_SECONDS and not getattr(self, "_dbus_quiet_warned", False):
+            self._dbus_quiet_warned = True
+            self.log(f"No PAA result has arrived over D-Bus for {quiet / 60.0:.0f} min. Check that "
+                     f"Ekos is still running with the Align module open and that Refresh is active; "
+                     f"'PAA values from' can be set to the Ekos log file instead.", logging.WARNING)
+
+    @QtCore.pyqtSlot(str)
+    def _on_ekos_align_log(self, message):
+        """One Ekos Align log line, pushed as it happens."""
+        if not self.autopa_running or self.paa_source != "dbus":
+            return
+        line = str(message)
+        if "PAA" not in line or "Corrected" not in line:
+            return
+        match = self.PAA_LINE_RE.search(line) or self.PAA_LEGACY_RE.search(line)
+        if not match:
+            return
+        try:
+            az = self._parse_paa_angle(match.group("az"))
+            alt = self._parse_paa_angle(match.group("alt"))
+        except ValueError as exc:
+            self.logger.debug("PAA angle parse failed over D-Bus (%s): %s", exc, line)
+            return
+        # A parsed PAA line proves the subscription is alive.
+        self._dbus_last_paa = datetime.now()
+        self._dbus_quiet_warned = False
+        if self.pa_motion_active or self.autopa_busy:
+            # Hold it rather than drop it: the poller would re-read the same
+            # line from its cache, but a pushed solution has no second chance.
+            digest = hashlib.sha1(line.encode("utf-8", "replace")).hexdigest()[:12]
+            self.paa_deferred = (f"dbus:{digest}", datetime.now(), az, alt, "D-Bus", line)
+            self.log("A PAA solution arrived while an AutoPA move was still running; "
+                     "it will be retried once the move finishes.")
+            return
+        # Derive the signature from the content, exactly as _scan_paa_file does
+        # with file/offset/digest. A counter would never repeat, which silently
+        # disabled the shared duplicate guard on this path: one measurement
+        # delivered twice (a resubscribe, a duplicated match rule) would be
+        # corrected twice, overshoot to the mirror of the error and oscillate.
+        digest = hashlib.sha1(line.encode("utf-8", "replace")).hexdigest()[:12]
+        # The signal arrives when Ekos computed the value, so "now" IS the
+        # measurement time - there is no timestamp to parse out of the text.
+        self._apply_paa_solution((f"dbus:{digest}", datetime.now(), az, alt, "D-Bus", line))
 
     # ------------------------ 0.3.0 monitor / calibration / firmware ------------------------
 
@@ -5383,7 +5497,14 @@ class OATHelper(QtWidgets.QMainWindow):
         self.safe_time_hours = hours
         total = max(0, int(round(hours * 60.0)))
         h, m = divmod(total, 60)
-        self.safe_ra_label.setText(_("RA tracking left: {hours:02d}:{minutes:02d}").format(hours=h, minutes=m))
+        # The wall-clock time is what you actually need before starting a
+        # sequence: the OAT cannot flip across the meridian, so this is the hard
+        # end of the session. "until 02:37" answers "can I run 4 hours?" -
+        # "02:35 left" makes you do the arithmetic in the dark.
+        until = (datetime.now() + timedelta(minutes=total)).strftime("%H:%M")
+        self.safe_ra_label.setText(
+            _("RA tracking left: {hours:02d}:{minutes:02d} (until {until})").format(
+                hours=h, minutes=m, until=until))
         if total <= 5:
             colour = "#d32f2f"
         elif total <= 15:
@@ -5504,10 +5625,6 @@ class OATHelper(QtWidgets.QMainWindow):
         for i,(name,cmd) in enumerate(cmds):
             b=QtWidgets.QPushButton(name); b.clicked.connect(lambda _=False,c=cmd:self.run_diag_command(c)); cg.addWidget(b,i//4,i%4)
         v.addWidget(common)
-        custom=QtWidgets.QGroupBox("Custom buttons"); gg=QtWidgets.QGridLayout(custom); self.custom_name_edits=[]; self.custom_cmd_edits=[]; saved=self.cfg.get("custom_commands",[]) or []
-        for i in range(4):
-            item=saved[i] if i<len(saved) else {"name":f"Custom {i+1}","command":""}; n=QtWidgets.QLineEdit(item.get("name",f"Custom {i+1}")); c=QtWidgets.QLineEdit(item.get("command","")); b=QtWidgets.QPushButton("Run"); b.clicked.connect(lambda _=False,idx=i:self.run_custom_slot(idx)); self.custom_name_edits.append(n); self.custom_cmd_edits.append(c); gg.addWidget(n,i,0); gg.addWidget(c,i,1); gg.addWidget(b,i,2)
-        v.addWidget(custom)
         self.diag_text=QtWidgets.QPlainTextEdit(); self.diag_text.setReadOnly(True); self.diag_text.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)); v.addWidget(self.diag_text,1)
         return w
 
@@ -5597,7 +5714,9 @@ class OATHelper(QtWidgets.QMainWindow):
         self.refresh_config_inspector()
 
     def import_configuration_file(self):
-        fn,_=QtWidgets.QFileDialog.getOpenFileName(self,"Select Configuration_local.hpp",str(Path.home()),"Header (*.hpp *.h);;All files (*)")
+        # Never unpack into `_`: that shadows the translation function for the
+        # whole scope, and the except branch below calls it.
+        fn,_filter=QtWidgets.QFileDialog.getOpenFileName(self,"Select Configuration_local.hpp",str(Path.home()),"Header (*.hpp *.h);;All files (*)")
         if fn:
             try: self._load_configuration_file(fn); self._sync_configuration_to_source()
             except Exception as exc: QtWidgets.QMessageBox.warning(self,_("Configuration"),str(exc))
@@ -5610,7 +5729,7 @@ class OATHelper(QtWidgets.QMainWindow):
             FIRMWARE_CONFIG.write_text(ed.toPlainText(),encoding="utf-8"); self._load_configuration_file(FIRMWARE_CONFIG,quiet=True); self._sync_configuration_to_source(); self.log("Configuration saved and synchronized to local firmware source when available.")
 
     def restore_configuration_backup(self):
-        d=CONFIG_DIR/"backups"; fn,_=QtWidgets.QFileDialog.getOpenFileName(self,"Select a Configuration backup",str(d if d.exists() else CONFIG_DIR),"Header (*.hpp *.h);;All files (*)")
+        d=CONFIG_DIR/"backups"; fn,_filter=QtWidgets.QFileDialog.getOpenFileName(self,"Select a Configuration backup",str(d if d.exists() else CONFIG_DIR),"Header (*.hpp *.h);;All files (*)")
         if fn:
             if FIRMWARE_CONFIG.exists(): shutil.copy2(FIRMWARE_CONFIG,self._configuration_backup_path())
             shutil.copy2(fn,FIRMWARE_CONFIG); self._load_configuration_file(FIRMWARE_CONFIG,quiet=True); self._sync_configuration_to_source(); self.log(f"Configuration restored: {fn}")
@@ -5672,11 +5791,6 @@ class OATHelper(QtWidgets.QMainWindow):
         except Exception as exc: QtWidgets.QMessageBox.warning(self,_("Command"),str(exc)); return
         self.save_config(); self.diag_text.appendPlainText(f"{datetime.now():%H:%M:%S} TX {cmd}")
         self.run_async(lambda:self.indi.meade(cmd,timeout=10),lambda r:self.diag_text.appendPlainText(f"{datetime.now():%H:%M:%S} RX {r or '<no payload>'}"),lambda e:self.diag_text.appendPlainText(f"ERROR {e}"))
-
-    def run_custom_slot(self,idx):
-        cmd=self.custom_cmd_edits[idx].text().strip()
-        if not cmd: return
-        self.command_edit.setText(cmd); self.send_custom_command()
 
     def select_firmware_source(self):
         d=QtWidgets.QFileDialog.getExistingDirectory(self,"Select the OpenAstroTracker-Firmware source",self.fw_source.text() or str(Path.home()))
@@ -6051,8 +6165,9 @@ class OATHelper(QtWidgets.QMainWindow):
             self._fw_log("Not a git repository, so it cannot be restored. Use 'Check for updates' to fetch a git source."); return
         if QtWidgets.QMessageBox.warning(
                 self,_("Restore source"),
-                "This discards all local changes in the firmware source and returns it to the current version.\n"
-                "(Configuration_local.hpp is stored separately in the OAT Firmware settings folder and is preserved.)\nContinue?",
+                _("This discards all local changes in the firmware source and returns it to the current "
+                  "version.\n(Configuration_local.hpp is stored separately in the OAT Firmware settings "
+                  "folder and is preserved.)\nContinue?"),
                 QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)!=QtWidgets.QMessageBox.Yes:
             return
         def job():
@@ -6086,9 +6201,14 @@ class OATHelper(QtWidgets.QMainWindow):
         """Run a command, forwarding every line to the GUI as it appears."""
         self.process_signals.started.emit(" ".join(str(c) for c in cmd))
         collected = []
+        # Always decode as UTF-8, never the locale encoding: under LANG=C
+        # PlatformIO's box-drawing output raised UnicodeDecodeError in the
+        # reader, which nulled _fw_process without killing the flasher - so the
+        # close guard saw "no process" while avrdude was still writing.
         process = subprocess.Popen([str(c) for c in cmd], cwd=str(cwd) if cwd else None,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, bufsize=1, universal_newlines=True)
+                                   text=True, bufsize=1, universal_newlines=True,
+                                   encoding="utf-8", errors="replace")
         self._fw_process = process
         deadline = time.time() + timeout
         try:
@@ -6264,13 +6384,28 @@ class OATHelper(QtWidgets.QMainWindow):
 
     def factory_reset(self):
         cmd=FACTORY_RESET_COMMAND
-        if self.factory_confirm.text().strip()!="RESET":QtWidgets.QMessageBox.warning(self,_("Factory Reset"),"Type RESET exactly in the Confirm field.");return
-        if QtWidgets.QMessageBox.warning(self,_("FACTORY RESET"),"EEPROM calibration, home offsets and runtime settings may be erased. Continue?",QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)!=QtWidgets.QMessageBox.Yes:return
+        if self.factory_confirm.text().strip()!="RESET":QtWidgets.QMessageBox.warning(self,_("Factory Reset"),_("Type RESET exactly in the Confirm field."));return
+        if QtWidgets.QMessageBox.warning(self,_("FACTORY RESET"),_("EEPROM calibration, home offsets and runtime settings may be erased. Continue?"),QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)!=QtWidgets.QMessageBox.Yes:return
         def job(): return self._snapshot_before_reset(),self.indi.meade(cmd,timeout=10)
         def done(x):self._fw_log(f"Pre-reset snapshot: {x[0]}\nFactory reset command sent. Response: {x[1] or '<no payload>'}\nPower-cycle/reconnect and verify Home/calibration.");self.factory_confirm.clear()
         self.run_async(job,done,lambda e:self._fw_log(e))
     # ------------------------ diagnostics/safety ------------------------
     def emergency_stop(self):
+        # Drop the AutoPA queue first. :Q# halts the motors, but a two-axis
+        # correction hands its second axis to QTimer.singleShot(150,
+        # _send_next_pa_axis), which only tests pa_motion_active - so leaving
+        # that flag set restarted the AZ axis 150 ms after the emergency stop.
+        self.pa_move_queue = []
+        self.pa_active_axis = None
+        self.pa_motion_active = False
+        self.pa_completion_scheduled = False
+        self.pa_seen_busy = False
+        self.pa_number_update_seen = False
+        self.pa_gx_seen_moving = False
+        for timer in (self.pa_ack_timer, self.pa_move_timeout, self.pa_fallback_poll):
+            timer.stop()
+        self.pa_fallback_busy = False
+        self._set_pa_motion_controls(True)
         self.stop_autopa_watch(); self.home_timer.stop(); self.home_busy=False; self.home_sequence=[]
         self.meade_async("@Q#", lambda _r: self.log("Emergency stop sent (:Q#). Tracking is also stopped.", logging.WARNING))
 
@@ -6310,19 +6445,99 @@ class OATHelper(QtWidgets.QMainWindow):
                     try:
                         if int(float(str(v).strip().rstrip("#")))!=0:
                             lines.append("WARNING       : The DEC homing offset is not zero. Firmware Park (:hP#) moves DEC by -offset after reaching Home "
-                                         "further (left over from an older OAT Tools). Running SET HOME clears it to zero.")
+                                         "further (left over from an older OAT Tools install). Running SET HOME clears it to zero.")
                     except Exception:
                         pass
             self.diag_text.setPlainText("\n".join(lines))
         self.run_async(job,done)
 
+    # Every repeating timer, so closing cannot leave one firing against a
+    # half-torn-down window or a closed socket.
+    _TIMER_ATTRS = ("autopa_timer", "home_timer", "monitor_timer", "pa_move_timeout",
+                    "pa_fallback_poll", "pa_ack_timer", "fw_elapsed_timer")
+
     def closeEvent(self, event):
-        try: self.save_config(); self.autopa_timer.stop(); self.home_timer.stop(); self.indi.disconnect_server()
-        except Exception: pass
+        # Stand the watcher and any queued axis down first. A modal QMessageBox
+        # spins the Qt event loop, so with the timers still running and the
+        # newLog subscription still live, a correction could be commanded while
+        # the user was deciding whether to close.
+        self.pa_move_queue = []
+        self.pa_active_axis = None
+        self.pa_motion_active = False
+        self.pa_completion_scheduled = False
+        if self.autopa_running:
+            self.stop_autopa_watch()
+        else:
+            self._stop_paa_dbus()
+        for name in self._TIMER_ATTRS:
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try: timer.stop()
+                except Exception: pass
+
+        process = getattr(self, "_fw_process", None)
+        if process is not None and process.poll() is None:
+            # A PlatformIO upload is writing the microcontroller's flash. Walking
+            # away orphans it: it keeps writing with no progress bar and no
+            # Cancel, and a half-written flash is how a board gets bricked.
+            if QtWidgets.QMessageBox.question(
+                    self, _("Firmware is being written"),
+                    _("A firmware build/flash is still running. Closing now stops it, and a "
+                      "half-written flash can leave the board unable to start.\n\n"
+                      "Close anyway?"),
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+                event.ignore()
+                return
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except Exception:
+                try: process.kill()
+                except Exception: pass
+            self.log("Firmware process terminated because the window was closed.", logging.WARNING)
+        try:
+            self.save_config()
+        except Exception:
+            pass
+        for name in self._TIMER_ATTRS:
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try: timer.stop()
+                except Exception: pass
+        try:
+            self.indi.disconnect_server()
+        except Exception:
+            pass
         event.accept()
 
 
+def install_crash_guard():
+    """Keep one bad callback from taking the whole window down.
+
+    PyQt5 >= 5.5 hands an unhandled exception raised inside a slot to qFatal(),
+    which calls abort(): every run_async() result handler and every QTimer slot
+    is such a slot, so a single unexpected value mid-session made the extension
+    vanish with no message and no log line - Ekos just shows it gone, in the
+    middle of a move.  A non-default excepthook is what stops that abort, so
+    install one that records the traceback instead.  The mount is left alone on
+    purpose: an exception here says the tool is confused, not that the mount is,
+    and stopping motion from an unknown state is its own hazard.
+    """
+    def hook(kind, value, tb):
+        text = "".join(traceback.format_exception(kind, value, tb))
+        try:
+            logging.getLogger("oat-helper").error("Unhandled exception:\n%s", text)
+        except Exception:
+            pass
+        sys.stderr.write(text)
+        sys.stderr.flush()
+
+    sys.excepthook = hook
+
+
 def main():
+    install_crash_guard()
     app=QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     win=OATHelper(); win.show()

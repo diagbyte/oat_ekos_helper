@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import ensure_indi_server, shutdown_app  # noqa: E402
 _server = ensure_indi_server()
 
-from PyQt5 import QtWidgets, QtCore, QtGui  # noqa: E402
+from PyQt5 import QtWidgets  # noqa: E402
 
 # auto-accept every dialog so the whole flow runs unattended
 QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes)
@@ -77,18 +77,13 @@ problems += step("SET HOME", w.finish_dec_manual_home, 5.0)
 problems += step("GO TO HOME", w.mini_goto_home, 4.0)
 problems += step("target check (reachable)",
                  lambda: (w.target_ra.setValue(3.0), w.target_dec.setValue(20.0), w.check_target_reachable()), 3.0)
-problems += step("slew rate", lambda: w.slew_rate_box.setCurrentIndex(3), 1.5)
 problems += step("tracking trim read", w.read_tracking_trim)
 problems += step("tracking trim save", w.save_tracking_trim, 2.5)
 problems += step("tracking on/off", lambda: (w.set_tracking(True), w.set_tracking(False)), 2.0)
-problems += step("keyboard slew",
-                 lambda: (w.tabs.setCurrentWidget(w.mini_tab),
-                          w.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Right,
-                                                          QtCore.Qt.NoModifier))), 3.0)
-problems += step("mini pad diagonal", lambda: w.mini_direction_move(-1, -1), 4.0)
 problems += step("unpark", w.unpark_mount, 1.5)
 problems += step("park", w.park_mount, 5.0)
-problems += step("shutdown position", lambda: (w.release_dec.setValue(-30.0), w.move_to_release_position()), 8.0)
+problems += step("end session (Home -> shutdown)",
+                 lambda: (w.release_dec.setValue(-30.0), w.end_session()), 14.0)
 # simulate a power cycle: the firmware zeroes the axes wherever they stand
 problems += step("simulated power cycle", lambda: (w.indi.meade("@SHP#"),
                                                    setattr(w, "dec_zero_shift", 0),
@@ -102,10 +97,9 @@ problems += step("read AutoPA position", w.read_pa_position, 2.0)
 problems += step("axis calibration apply",
                  lambda: (setattr(w, "axis_calculated_spd", 1005.0), setattr(w, "axis_calculated_axis", "RA"),
                           w.apply_axis_calibration()), 4.0)
-problems += step("drift alignment", lambda: (w.drift_seconds.setValue(10), w.run_drift_alignment()), 3.0)
 problems += step("diagnostics", w.refresh_diagnostics, 4.0)
 problems += step("monitor refresh", w.refresh_mount_monitor, 3.0)
-problems += step("checklist edit state", lambda: w.checklist_boxes[0].setChecked(True), 0.5)
+problems += step("polar axis numbers", w.update_site_angles, 0.5)
 problems += step("language ko", lambda: w.lang_box.setCurrentIndex(w.lang_box.findData("ko")), 1.5)
 problems += step("advanced mode", lambda: w.advanced_toggle.setChecked(True), 1.5)
 problems += step("simple mode", lambda: w.advanced_toggle.setChecked(False), 1.5)

@@ -51,7 +51,6 @@ w.cfg["magnetic_declination_deg"] = -8.0   # optional config key, no UI
 w.update_site_angles()
 pump(0.5)
 print("with optional declination -8:", w.site_angle_label.text().replace("\n", " | "))
-print("checklist items:", [b.text() for b in w.checklist_boxes][:3])
 idx = w.lang_box.findData("ko")
 w.lang_box.setCurrentIndex(idx)
 pump(1.0)

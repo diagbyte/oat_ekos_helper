@@ -20,6 +20,11 @@ shutil.rmtree("/tmp/autopa_stale", ignore_errors=True)
 logdir = Path("/tmp/autopa_stale/.local/share/kstars/logs/2026-09-18")
 logdir.mkdir(parents=True, exist_ok=True)
 Path("/tmp/autopa_stale/.config").mkdir(parents=True, exist_ok=True)
+Path("/tmp/autopa_stale/.config/oat-helper").mkdir(parents=True, exist_ok=True)
+# Pin the source: with "auto", a dev box running KStars with the Align
+# module open would take the D-Bus path and never read these fixtures.
+Path("/tmp/autopa_stale/.config/oat-helper/config.json").write_text(
+    '{"paa_source": "logfile"}', encoding="utf-8")
 Path("/tmp/autopa_stale/.config/kstarsrc").write_text("[General]\nLogToFile=true\nLogToDefault=false\n")
 LOG = logdir / "log_21-01-02.txt"
 LOG.write_text("start\n")
@@ -57,7 +62,7 @@ counter = [0]
 def refresh(az_arcmin, alt_arcmin, when=None):
     counter[0] += 1
     stamp = (when or datetime.now()).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    with LOG.open("a") as fh:
+    with LOG.open("a", encoding="utf-8") as fh:
         fh.write(f"[{stamp} KST INFO] [org.kde.kstars.ekos.align] - "
                  f"PAA Refresh({counter[0]}): Corrected az: {dms(az_arcmin)} alt: {dms(alt_arcmin)} "
                  f"total: 02\u00b0 00' 00\"\n")
@@ -67,6 +72,7 @@ pump(3.0)
 w.accuracy.setValue(60)
 w.max_move.setValue(140)
 w.wait_two.setChecked(False)
+w.autopa_settle.setValue(0)          # isolate the timestamp rule from the settle window
 w.autopa_timer.setInterval(500)
 
 refresh(-112, -105)          # the solution that starts the run

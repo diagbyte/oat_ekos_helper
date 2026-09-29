@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+
+# The installer strips these from the KStars extensions directory because any
+# stray file there interferes with extension discovery; keep them out of git too.
+*.egg-info/
+.pytest_cache/

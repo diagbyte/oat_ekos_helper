@@ -109,10 +109,13 @@ cfg = json.loads(Path("/tmp/h064/.config/oat-helper/config.json").read_text())
 assert "factory_reset_command" not in cfg
 print("factory reset command fixed to :XFR#")
 
+# The Controller tab used to duplicate Ekos' Mount tab (direction pad,
+# keyboard slew, slew rate). All of that is gone; only the OAT's sidereal
+# rate trim, which Ekos has no control for, remains.
 mini = buttons(w.mini_tab)
-assert "GO HOME — RA / DEC" not in mini and mini.count("HOME") == 1, mini
-home_key = next(b for b in w.mini_tab.findChildren(QtWidgets.QPushButton) if b.text() == "HOME")
-assert ":hF#" in home_key.toolTip(), home_key.toolTip()
+assert "HOME" not in mini, mini
+assert not any(b in mini for b in ("←", "→", "↑", "↓")), mini
+assert set(mini) == {"Read", "Save"}, mini
 mini_text = " ".join(l.text() for l in w.mini_tab.findChildren(QtWidgets.QLabel))
 assert "option on the Home tab" not in mini_text
 print("mini controller: one HOME key with the right tooltip, stale note fixed")
