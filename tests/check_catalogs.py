@@ -7,7 +7,7 @@ English forever.
 
 It also reports how many _()-wrapped strings have no entry yet. That is a count,
 not a failure: a missing key falls back to English on purpose, so a partial
-translation is a supported state (see CONTRIBUTING.md). The number is printed so
+translation is a supported state. The number is printed so
 the gap is discoverable instead of having to be hunted for.
 """
 import ast

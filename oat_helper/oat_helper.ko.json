@@ -312,7 +312,6 @@
  "Shutdown position": "종료 위치",
  "Shutdown position  DEC": "종료 위치  DEC",
  "Shutdown position DEC": "종료 위치 DEC",
- "Shutdown procedure: GO TO HOME -> 'Move to shutdown position' -> power off. In the next session, use 'Restore DEC Home' to ": "종료 절차: GO TO HOME → '종료 위치로 이동' → 전원 OFF. 다음 세션에서는 '저장된 DEC Home 복원'으로 ",
  "Site {lat} {lon} (from Ekos) - the altitude is your latitude. True north is not compass north.": "관측지 {lat} {lon} (Ekos 기준) — 극축 고도는 위도와 같습니다. 진북은 나침반 북쪽과 다릅니다.",
  "Source": "소스",
  "Source:": "소스:",
@@ -559,5 +558,6 @@
  "Factory Reset": "공장 초기화",
  "Firmware Flash": "펌웨어 Flash",
  "Flash blocked": "Flash 차단됨",
- "RA fine adjustment (firmware :XGR# degree conversion)": "RA 미세 조정 (펌웨어 :XGR# 도 단위 변환)"
+ "RA fine adjustment (firmware :XGR# degree conversion)": "RA 미세 조정 (펌웨어 :XGR# 도 단위 변환)",
+ "SET HOME is firmware :SHP# (the same routine as the LCD 'Set home pos?'). A sensorless DEC is reset when power is removed. At the end of the night press 'End session', which runs GO TO HOME and the shutdown move in order, then power off. In the next session, use 'Restore DEC Home' to return to Home, then run SET HOME.": "SET HOME은 펌웨어 :SHP#입니다(LCD의 'Set home pos?'와 같은 루틴). 센서리스 DEC는 전원을 끄면 초기화됩니다. 관측이 끝나면 'End session'을 누르세요. GO TO HOME과 종료 위치 이동을 순서대로 실행하며, 그 뒤 전원을 끄면 됩니다. 다음 세션에서는 '저장된 DEC Home 복원'으로 Home에 복귀한 뒤 SET HOME을 실행하세요."
 }

@@ -1850,13 +1850,13 @@ class OATHelper(QtWidgets.QMainWindow):
 
         note = self._hint(
             "SET HOME is firmware :SHP# (the same routine as the LCD 'Set home pos?'). A sensorless DEC is reset when power is removed. "
-            "Shutdown procedure: GO TO HOME -> 'Move to shutdown position' -> power off. In the next session, use 'Restore DEC Home' to "
-            "return to Home, then run SET HOME.")
+            "At the end of the night press 'End session', which runs GO TO HOME and the shutdown move in order, then power off. "
+            "In the next session, use 'Restore DEC Home' to return to Home, then run SET HOME.")
         note.setToolTip(
             "SET HOME sets the current RA/DEC to logical 0 at once, and success is verified by reading :GX# RA=0/DEC=0 rather than by the reply character.\n"
             "The DEC XSHD offset is not used, and any leftover value is cleared to zero so that Ekos Park stops exactly at this Home.\n"
             "GO TO HOME (:hF#) returns both axes to this Home(0) within the same power session.")
-        fg.addWidget(note,4,0,1,4)
+        fg.addWidget(note,5,0,1,4)
         v.addWidget(final)
         self._update_dec_restore_label()
 

@@ -12,12 +12,17 @@ every night.
 > **Unofficial community project.** Not affiliated with or endorsed by
 > OpenAstroTech. It commands real hardware — read the safety notes below.
 
+![The Home tab](images/home.png)
+
+*The Home tab: the nightly sequence in order — mount clock, RA AutoHome, fine
+adjustment, SET HOME, and one button to close the session down.*
+
 ## What it does
 
 **Observing** — the three tabs you normally see.
 
-- Session setup wizard and field checklist, with the polar-axis altitude
-  computed from the site Ekos reports (Seoul 37.57°N → tilt the RA axis 37.6°)
+- Session setup wizard, with the polar-axis altitude computed from the site
+  Ekos reports (Seoul 37.57°N → tilt the RA axis 37.6°)
 - HA/time sync that writes and verifies the mount's sidereal time (a stale one
   makes GOTO flip across the meridian), RA Hall AutoHome, manual DEC home,
   SET HOME, GO TO HOME
@@ -35,6 +40,18 @@ every night.
 
 The window opens with three tabs; the rest is behind the **Advanced** toggle.
 
+![The AutoPA tab](images/autopa.png)
+
+*AutoPA reads each Ekos PAA Refresh result and drives ALT/AZ against the error.
+"Settle after a correction" covers one capture+solve cycle so the same
+measurement is never applied twice.*
+
+![The Monitor tab](images/monitor.png)
+
+*The mount monitor. "RA tracking left" is the one that decides how long a
+sequence can run: the OAT cannot flip across the meridian, so it is shown as a
+time of day as well as a countdown.*
+
 **Firmware maintenance** — behind the Advanced toggle, and only on the machine
 the OAT is plugged into (the tab hides itself elsewhere).
 
@@ -45,6 +62,12 @@ the OAT is plugged into (the tab hides itself elsewhere).
   serial port is free and reconnects it afterwards, with live output, a progress
   bar and a Cancel button
 - Guarded factory reset
+
+![The Firmware tab](images/firmware.png)
+
+*Firmware maintenance. The banner says plainly when this machine is not the one
+holding the USB cable, and it warns that the configured upload port is absent
+rather than failing halfway through a flash.*
 
 ## Requirements
 
@@ -100,8 +123,8 @@ arrive over the session D-Bus bus (`org.kde.kstars.Ekos.Align`), so nothing has
 to be configured: no Ekos file logging, no log path. The AutoPA tab shows which
 source is in use.
 
-If D-Bus is unavailable — no session bus, no `python3-pyqt5.qtdbus`, or Ekos'
-Align module was never opened — it falls back to parsing the KStars log file and
+If D-Bus is unavailable — no session bus, no `PyQt5.QtDBus`, or Ekos' Align
+module was never opened — it falls back to parsing the KStars log file and
 says so in the log. That path needs Ekos file logging on. If you start
 `oat_helper.py` by hand on a different machine than KStars, share the KStars
 `logs` folder and point `ekos_log_dir` in `~/.config/oat-helper/config.json`
@@ -136,10 +159,13 @@ The UI language follows the desktop the extension runs on, for the same reason.
 5. Measure in Ekos PAA, then `Start PAA automatic correction`. Check the first
    move goes the right way — if an axis runs backwards, set `ALT_INVERT_DIR` /
    `AZ_INVERT_DIR` in `Configuration_local.hpp`, not a tool-side option
-6. Image. When finished: **End session (Home → shutdown position)** → power off
+6. Focus, then calibrate guiding — **after** AutoPA, because the ALT/AZ moves
+   change the axes a stored calibration was measured against
+7. Image. When finished: **End session (Home → shutdown position)** → power off
 
-Step 6 records the reverse of the move, so step 4 brings DEC straight back to
-Home in the next session.
+Step 7 records the reverse of the move, so step 4 brings DEC straight back to
+Home in the next session. It is the step that is easy to skip and expensive to
+skip, which is why it is one button.
 
 The window opens in **simple mode** with three tabs. Everything else is behind
 the **Advanced** button in the status bar.
@@ -180,7 +206,13 @@ python3 tests/run_all.py autopa     # just the AutoPA tests
 
 Each test starts its own fake INDI server on a private port, so nothing has to
 be running first — and the suite can never reach a real `indiserver` on 7624.
-GitHub Actions runs the same command on every push.
+
+The screenshots above are generated from the real window against the same fake
+mount, so they cannot drift from the code:
+
+```bash
+python3 tests/make_screenshots.py    # needs a display; xvfb-run -a also works
+```
 
 ## License
 
