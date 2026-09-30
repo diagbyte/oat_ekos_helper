@@ -1363,7 +1363,6 @@ class OATHelper(QtWidgets.QMainWindow):
         self.wizard_tab = self._as_page(self.make_wizard_tab())
         self.home_tab = self._as_page(self.make_home_tab())
         self.pa_tab = self._as_page(self.make_pa_tab())
-        self.mini_tab = self._as_page(self.make_mini_tab())
         self.monitor_tab = self._as_page(self.make_monitor_tab())
         self.axis_tab = self._as_page(self.make_axis_cal_tab())
         self.diag_tab = self._as_page(self.make_diag_tab())
@@ -1373,7 +1372,6 @@ class OATHelper(QtWidgets.QMainWindow):
             (self.wizard_tab, "Session setup", False),
             (self.home_tab, "Home", False),
             (self.pa_tab, "AutoPA", False),
-            (self.mini_tab, "Controller", True),
             (self.monitor_tab, "Monitor", True),
             (self.axis_tab, "Axis cal", True),
             (self.diag_tab, "Diag", True),
@@ -2039,40 +2037,6 @@ class OATHelper(QtWidgets.QMainWindow):
         v.addWidget(self._mark_advanced(pos)); v.addStretch(1)
         return w
 
-    def make_mini_tab(self):
-        """Tracking rate trim.
-
-        The direction pad, the keyboard slew, the slew-rate selector and the
-        ALT/AZ nudge buttons all duplicated Ekos' own Mount and AutoPA controls
-        (TELESCOPE_SLEW_RATE is provided by LX200Telescope, which this driver
-        inherits), so they are gone. The sidereal rate trim has no Ekos
-        equivalent and stays.
-        """
-        w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        info = QtWidgets.QLabel(
-            "Slewing, direction buttons and slew rate live in Ekos' own Mount tab. "
-            "What is here is the OAT's sidereal rate trim, which Ekos has no control for.")
-        info.setWordWrap(True); v.addWidget(info)
-
-        tr = QtWidgets.QGroupBox("Tracking rate trim (:XGS# / :XSS#)")
-        tg = QtWidgets.QGridLayout(tr); tg.setSpacing(6)
-        self.track_trim = QtWidgets.QDoubleSpinBox(); self.track_trim.setRange(0.5, 1.5)
-        self.track_trim.setDecimals(4); self.track_trim.setSingleStep(0.0005)
-        self.track_trim.setValue(1.0); self.track_trim.setMaximumWidth(100)
-        self.track_speed_label = QtWidgets.QLabel("Tracking speed -")
-        read_trim = QtWidgets.QPushButton("Read"); read_trim.clicked.connect(self.read_tracking_trim)
-        save_trim = QtWidgets.QPushButton("Save"); save_trim.clicked.connect(self.save_tracking_trim)
-        tg.addWidget(QtWidgets.QLabel("Trim factor"), 0, 0); tg.addWidget(self.track_trim, 0, 1)
-        tg.addWidget(read_trim, 0, 2); tg.addWidget(save_trim, 0, 3)
-        tg.addWidget(self.track_speed_label, 1, 0, 1, 4)
-        hint = self._hint(
-            "Above 1.0 tracks faster, below 1.0 slower. Adjust only when stars drift in RA with "
-            "the polar alignment already correct, and in very small steps.")
-        tg.addWidget(hint, 2, 0, 1, 4)
-        v.addWidget(tr)
-        v.addStretch(1)
-        return w
-
     def make_monitor_tab(self):
         w=QtWidgets.QWidget(); v=QtWidgets.QVBoxLayout(w)
         info=QtWidgets.QLabel("Shows the live :GX# position together with the configured soft/physical limits. RA is in hours from Home, DEC in degrees.")
@@ -2165,7 +2129,28 @@ class OATHelper(QtWidgets.QMainWindow):
         v.addLayout(g); v.addWidget(self.axis_start_label); v.addWidget(self.axis_result)
         self._update_axis_restore_button()
         back=QtWidgets.QLabel("For a precise check, measure both directions with +D, -2D, +D and compare the backlash difference. This version records each run so you can repeat and compare.")
-        back.setWordWrap(True); v.addWidget(back); v.addStretch(1); return w
+        back.setWordWrap(True); v.addWidget(back)
+
+        # Same job as the rest of this page: observe, then write a constant to
+        # the mount. Ekos has no control for the sidereal rate, so this is the
+        # only place it can be set.
+        tr = QtWidgets.QGroupBox("Tracking rate trim (:XGS# / :XSS#)")
+        tg = QtWidgets.QGridLayout(tr); tg.setSpacing(6)
+        self.track_trim = QtWidgets.QDoubleSpinBox(); self.track_trim.setRange(0.5, 1.5)
+        self.track_trim.setDecimals(4); self.track_trim.setSingleStep(0.0005)
+        self.track_trim.setValue(1.0); self.track_trim.setMaximumWidth(100)
+        self.track_speed_label = QtWidgets.QLabel("Tracking speed -")
+        read_trim = QtWidgets.QPushButton("Read"); read_trim.clicked.connect(self.read_tracking_trim)
+        save_trim = QtWidgets.QPushButton("Save"); save_trim.clicked.connect(self.save_tracking_trim)
+        tg.addWidget(QtWidgets.QLabel("Trim factor"), 0, 0); tg.addWidget(self.track_trim, 0, 1)
+        tg.addWidget(read_trim, 0, 2); tg.addWidget(save_trim, 0, 3)
+        tg.addWidget(self.track_speed_label, 1, 0, 1, 4)
+        tg.addWidget(self._hint(
+            "Above 1.0 tracks faster, below 1.0 slower. Adjust only when stars drift in RA with "
+            "the polar alignment already correct, and in very small steps."), 2, 0, 1, 4)
+        v.addWidget(tr)
+
+        v.addStretch(1); return w
 
 
     # ------------------------ async helpers ------------------------

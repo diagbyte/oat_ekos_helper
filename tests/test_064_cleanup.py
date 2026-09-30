@@ -109,16 +109,15 @@ cfg = json.loads(Path("/tmp/h064/.config/oat-helper/config.json").read_text())
 assert "factory_reset_command" not in cfg
 print("factory reset command fixed to :XFR#")
 
-# The Controller tab used to duplicate Ekos' Mount tab (direction pad,
-# keyboard slew, slew rate). All of that is gone; only the OAT's sidereal
-# rate trim, which Ekos has no control for, remains.
-mini = buttons(w.mini_tab)
-assert "HOME" not in mini, mini
-assert not any(b in mini for b in ("←", "→", "↑", "↓")), mini
-assert set(mini) == {"Read", "Save"}, mini
-mini_text = " ".join(l.text() for l in w.mini_tab.findChildren(QtWidgets.QLabel))
-assert "option on the Home tab" not in mini_text
-print("mini controller: one HOME key with the right tooltip, stale note fixed")
+# The Controller tab duplicated Ekos' own Mount tab (direction pad, keyboard
+# slew, slew rate, tracking toggle) and is gone. Its one control with no Ekos
+# equivalent, the sidereal rate trim, sits with the other calibration.
+tabs = [w.tabs.tabText(i) for i in range(w.tabs.count())]
+assert "Controller" not in tabs, tabs
+axis = buttons(w.axis_tab)
+assert "Read" in axis and "Save" in axis, axis
+assert hasattr(w, "track_trim") and hasattr(w, "track_speed_label")
+print("no Controller tab; tracking trim is on Axis cal")
 
 fw = buttons(w.firmware_tab)
 assert "Refresh version" not in fw and "Check latest release" not in fw, fw

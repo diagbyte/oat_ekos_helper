@@ -541,7 +541,6 @@
  "Move the mount to Home and then to the shutdown position, ready for power off?\n\nThis also records the DEC travel that 'Restore saved DEC Home' replays next time.": "마운트를 Home으로 보낸 뒤 종료 위치로 이동해 전원을 끌 준비를 할까요?\n\n이 과정에서 다음 세션의 '저장된 DEC Home 복원'이 재현할 DEC 이동량도 함께 기록됩니다.",
  "Polar axis setup": "극축 설정",
  "Tracking rate trim (:XGS# / :XSS#)": "추적 속도 보정 (:XGS# / :XSS#)",
- "Slewing, direction buttons and slew rate live in Ekos' own Mount tab. What is here is the OAT's sidereal rate trim, which Ekos has no control for.": "슬루, 방향 버튼, 슬루 속도는 Ekos의 Mount 탭에 있습니다. 여기 있는 것은 Ekos에 해당 기능이 없는 OAT의 항성시 속도 보정입니다.",
  "Above 1.0 tracks faster, below 1.0 slower. Adjust only when stars drift in RA with the polar alignment already correct, and in very small steps.": "1.0보다 크면 빠르게, 작으면 느리게 추적합니다. 극축이 이미 맞은 상태에서 별이 RA 방향으로 흐를 때만, 아주 조금씩 조정하세요.",
  "Trim factor": "보정 계수",
  "Configuration": "Configuration 파일",
