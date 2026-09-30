@@ -161,8 +161,6 @@
  "For a precise check, measure both directions with +D, -2D, +D and compare the backlash difference. This version records each run so you can repeat and compare.": "정밀 검증은 +D, -2D, +D로 양방향 측정해 backlash 차이를 비교하는 것을 권장합니다. 이 버전은 각 실행 결과를 기록해 반복 비교할 수 있습니다.",
  "For safety, connect to the INDI server first and confirm that the mount is Disconnected.": "안전을 위해 먼저 INDI 서버에 연결하고 마운트가 Disconnected 인지 확인하세요.",
  "Frequently used commands": "자주 쓰는 명령",
- "From Home, DEC": "Home 기준 DEC",
- "From Home, DEC {dec:+.1f}°, RA {ra:+.1f}°.\nThat is {amount:.1f}° in the same direction as {direction}.\n\nMove to Home with GO TO HOME first?\n  Yes - go to Home first, then to the shutdown position (recommended)\n  No - move relatively from the current position": "Home 기준 DEC {dec:+.1f}°, RA {ra:+.1f}° 위치입니다.\n{direction} 과 같은 방향으로 {amount:.1f}° 이동합니다.\n\n먼저 GO TO HOME으로 Home에 맞출까요?\n  예 — Home으로 간 뒤 종료 위치로 이동 (권장)\n  아니오 — 현재 위치에서 상대 이동",
  "GEOGRAPHIC_COORD / TIME_UTC could not be found in INDI.": "INDI의 GEOGRAPHIC_COORD / TIME_UTC를 찾지 못했습니다.",
  "GEOGRAPHIC_COORD element could not be parsed:": "GEOGRAPHIC_COORD element를 해석할 수 없습니다:",
  "GO TO HOME (:hF#) returns both axes to this Home(0) within the same power session.": "GO TO HOME(:hF#)은 같은 전원 세션에서 두 축을 이 Home(0)으로 되돌립니다.",
@@ -210,7 +208,6 @@
  "Moves the mount to Home, parks it and stops tracking.": "마운트를 Home으로 보내고 파킹한 뒤 트래킹을 멈춥니다.",
  "Moving to the saved DEC Home...": "저장된 DEC Home으로 이동 중…",
  "Moving to the shutdown position...": "종료 위치로 이동 중…",
- "No - move relatively from the current position": "아니오 — 현재 위치에서 바로 상대 이동",
  "No PAA Refresh line has been found for 60 seconds. Use 'Diagnose PAA log' on the AutoPA tab to": "60초 동안 PAA Refresh 줄을 찾지 못했습니다. AutoPA 탭의 'PAA 로그 진단'으로",
  "No PAA Refresh line was found. Run a measurement and one Refresh in the Ekos Align": "PAA Refresh 줄을 찾지 못했습니다. Ekos Align → Polar Alignment Assistant에서",
  "No PAA log value": "PAA 로그값 없음",
@@ -558,5 +555,6 @@
  "Restore DEC Home — already set this session": "DEC Home 복원 — 이번 세션에서 이미 설정됨",
  "Replays the DEC travel from the power-on position to Home that was recorded by the last shutdown move, then runs SET HOME. Valid only while DEC still stands where the mount powered on. To return to Home later in the session, use GO TO HOME instead.": "지난번 종료 이동 때 기록한 '전원 투입 위치 → Home' DEC 이동량을 재현한 뒤 SET HOME을 실행합니다. DEC가 아직 전원을 켰을 때의 위치에 그대로 있을 때만 유효합니다. 세션 중간에 Home으로 돌아가려면 GO TO HOME을 사용하세요.",
  "DEC Home is established. The saved value is the travel from the power-on position, not a position, so replaying it now would move DEC away from Home. Use GO TO HOME to return to Home.": "DEC Home이 이미 설정되어 있습니다. 저장된 값은 위치가 아니라 전원 투입 위치로부터의 이동량이라, 지금 재현하면 DEC가 Home에서 멀어집니다. Home으로 돌아가려면 GO TO HOME을 사용하세요.",
- "Nothing recorded yet. Aim DEC at Home and run SET HOME, then end the session with 'End session': the shutdown move records the travel this button replays.": "아직 기록된 값이 없습니다. DEC를 Home에 맞추고 SET HOME을 실행한 뒤, 'End session'으로 세션을 마치세요. 그 종료 이동이 이 버튼이 재현할 이동량을 기록합니다."
+ "Nothing recorded yet. Aim DEC at Home and run SET HOME, then end the session with 'End session': the shutdown move records the travel this button replays.": "아직 기록된 값이 없습니다. DEC를 Home에 맞추고 SET HOME을 실행한 뒤, 'End session'으로 세션을 마치세요. 그 종료 이동이 이 버튼이 재현할 이동량을 기록합니다.",
+ "Move to the shutdown position: DEC {dec:+.1f}°, RA {ra:+.1f}° from Home.\nThat is {amount:.1f}° in the same direction as {direction}.\n\nBoth options end in the same place; only the path differs.\n  Yes - go to Home first, then out to the shutdown position (recommended)\n  No - go straight there from where the axes are now": "종료 위치로 이동합니다: Home 기준 DEC {dec:+.1f}°, RA {ra:+.1f}°.\n{direction}과 같은 방향으로 {amount:.1f}°입니다.\n\n두 방법 모두 같은 위치에서 끝나며, 가는 경로만 다릅니다.\n  예 - 먼저 Home으로 간 뒤 종료 위치로 (권장)\n  아니오 - 현재 위치에서 바로 이동"
 }

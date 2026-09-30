@@ -2571,11 +2571,11 @@ class OATHelper(QtWidgets.QMainWindow):
         if confirm:
             answer = QtWidgets.QMessageBox.question(
                 self, _("Move to shutdown position"),
-                _("From Home, DEC {dec:+.1f}°, RA {ra:+.1f}°.\n"
+                _("Move to the shutdown position: DEC {dec:+.1f}°, RA {ra:+.1f}° from Home.\n"
                   "That is {amount:.1f}° in the same direction as {direction}.\n\n"
-                  "Move to Home with GO TO HOME first?\n"
-                  "  Yes - go to Home first, then to the shutdown position (recommended)\n"
-                  "  No - move relatively from the current position").format(
+                  "Both options end in the same place; only the path differs.\n"
+                  "  Yes - go to Home first, then out to the shutdown position (recommended)\n"
+                  "  No - go straight there from where the axes are now").format(
                     dec=dec_deg, ra=ra_deg, amount=abs(dec_deg), direction=direction),
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
                 QtWidgets.QMessageBox.Yes)
@@ -2604,22 +2604,31 @@ class OATHelper(QtWidgets.QMainWindow):
             start = self._wait_for_ra_dec_idle(wait_ra=True, wait_dec=True, timeout=30.0)
             started_at_home = int(start["dec_steps"]) == 0
 
+            # The shutdown position is defined from Home, and :GX# reports both
+            # axes relative to Home(0), so move by the difference. Sending the
+            # whole angle every time made a second press add it again and drive
+            # the axis to twice the offset, past its travel.
             dec_spd = self._read_dec_steps_per_degree()
-            dec_steps = self._dec_steps_for_degrees(dec_deg, dec_spd)
+            dec_target = self._dec_steps_for_degrees(dec_deg, dec_spd)
+            dec_from = int(start["dec_steps"])
+            dec_delta = dec_target - dec_from
             moved_dec = 0
-            if dec_steps:
-                self.indi.meade(f"@MXd{dec_steps}#")
+            if dec_delta:
+                self.indi.meade(f"@MXd{dec_delta}#")
                 end = self._wait_for_dec_idle(timeout=180.0)
-                moved_dec = int(end["dec_steps"]) - int(start["dec_steps"])
-                if abs(moved_dec - dec_steps) > max(4, abs(dec_steps) // 100):
+                moved_dec = int(end["dec_steps"]) - dec_from
+                if abs(moved_dec - dec_delta) > max(4, abs(dec_delta) // 100):
                     raise RuntimeError(
-                        f"The DEC move was clamped: requested {dec_steps:+d} step, actual {moved_dec:+d} step. "
+                        f"The DEC move was clamped: requested {dec_delta:+d} step, actual {moved_dec:+d} step. "
                         "Check the firmware DEC limits.")
-            if abs(ra_deg) > 1e-6:
+            else:
+                self.log(f"DEC is already at the shutdown position ({dec_deg:+.1f}° from Home); "
+                         "nothing to move.")
+            if abs(ra_deg) > 1e-6 or int(start["ra_steps"]) != 0:
                 ra_spd = self._read_ra_steps_per_degree()
-                ra_steps = self._ra_steps_for_degrees(ra_deg, ra_spd)
-                if ra_steps:
-                    self.indi.meade(f"@MXr{ra_steps}#")
+                ra_delta = self._ra_steps_for_degrees(ra_deg, ra_spd) - int(start["ra_steps"])
+                if ra_delta:
+                    self.indi.meade(f"@MXr{ra_delta}#")
                     self._wait_for_ra_dec_idle(wait_ra=True, timeout=180.0)
             return started_at_home, moved_dec
 
