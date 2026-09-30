@@ -85,9 +85,8 @@ problems += step("park", w.park_mount, 5.0)
 problems += step("end session (Home -> shutdown)",
                  lambda: (w.release_dec.setValue(-30.0), w.end_session()), 14.0)
 # simulate a power cycle: the firmware zeroes the axes wherever they stand
-problems += step("simulated power cycle", lambda: (w.indi.meade("@SHP#"),
-                                                   setattr(w, "dec_zero_shift", 0),
-                                                   setattr(w, "dec_odometer_valid", True)), 2.0)
+problems += step("simulated power cycle",
+                 lambda: (w.on_mount_connection_changed(True), w.indi.meade("@SHP#")), 2.0)
 problems += step("restore saved DEC Home", lambda: w.restore_saved_dec_home(confirm=False), 8.0)
 problems += step("PAA log diagnosis", w.diagnose_paa_log, 3.0)
 problems += step("AutoPA start", w.start_autopa_watch, 3.0)

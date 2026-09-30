@@ -946,6 +946,11 @@ class OATHelper(QtWidgets.QMainWindow):
         # as nothing else re-zeroed the axis.  Reset when the mount reconnects.
         self.dec_zero_shift = 0
         self.dec_odometer_valid = True
+        # True once SET HOME has established Home in this power cycle. The
+        # saved DEC Home is a travel replayed from the power-on position, so it
+        # must not be replayed again once Home exists - :GX# DEC == 0 cannot
+        # tell the two situations apart, because SET HOME makes DEC read 0.
+        self.dec_home_established = False
         self.home_dec_at_start = 0
 
         # Per-session shooting-preparation wizard state.  These flags only say
@@ -3527,6 +3532,8 @@ class OATHelper(QtWidgets.QMainWindow):
             # zero at the physical power-on position again.
             self.dec_zero_shift = 0
             self.dec_odometer_valid = True
+            self.dec_home_established = False
+            self._update_dec_restore_label()
             self.wizard_ra_done = False
             self.wizard_dec_done = False
             self.update_wizard_status()
@@ -4075,6 +4082,8 @@ class OATHelper(QtWidgets.QMainWindow):
                 self.dec_odometer_valid = True
             self.dec_manual_active = False
             self.wizard_dec_done = True
+            self.dec_home_established = True
+            self._update_dec_restore_label()
             self.dec_manual_status.setText(_("✓ SET HOME done - the current RA/DEC is Home(0)."))
             if cleared:
                 self.log(f"A DEC homing offset left by an older version (XSHD={cleared:+d}) was cleared to zero. "
@@ -4102,18 +4111,38 @@ class OATHelper(QtWidgets.QMainWindow):
         self.run_async(job, done, err, finished)
 
     def _update_dec_restore_label(self):
+        """Keep the restore button honest about what it can do right now."""
         if not hasattr(self, "dec_restore_btn"):
             return
         off = self.cfg.get("dec_home_offset_steps")
         if off is None:
             self.dec_restore_btn.setEnabled(False)
             self.dec_restore_btn.setText(_("Restore DEC Home — none saved"))
+            self.dec_restore_btn.setToolTip(_(
+                "Nothing recorded yet. Aim DEC at Home and run SET HOME, then end the session with "
+                "'End session': the shutdown move records the travel this button replays."))
             return
         spd = self.cfg.get("dec_home_steps_per_degree")
         deg = f" ≈ {float(off)/float(spd):+.2f}°" if spd else ""
+        if getattr(self, "dec_home_established", False):
+            # Replaying the travel from Home would walk DEC a whole shutdown
+            # move away and call that Home, and :GX# DEC reads 0 here exactly
+            # as it does at power-on, so the button has to say so itself.
+            self.dec_restore_btn.setEnabled(False)
+            self.dec_restore_btn.setText(_("Restore DEC Home — already set this session"))
+            self.dec_restore_btn.setToolTip(_(
+                "DEC Home is established. The saved value is the travel from the power-on position, "
+                "not a position, so replaying it now would move DEC away from Home. Use GO TO HOME "
+                "to return to Home."))
+            return
         self.dec_restore_btn.setEnabled(True)
         self.dec_restore_btn.setText(
-            f"Restore DEC Home ({int(off):+d} step{deg}, {self.cfg.get('dec_home_saved_at','')})")
+            _("Restore DEC Home after power-on ({steps:+d} step{degrees}, {saved})").format(
+                steps=int(off), degrees=deg, saved=self.cfg.get("dec_home_saved_at", "")))
+        self.dec_restore_btn.setToolTip(_(
+            "Replays the DEC travel from the power-on position to Home that was recorded by the "
+            "last shutdown move, then runs SET HOME. Valid only while DEC still stands where the "
+            "mount powered on. To return to Home later in the session, use GO TO HOME instead."))
 
     def restore_saved_dec_home(self, confirm=True):
         """Replay the recorded power-on→Home DEC delta, then SET HOME.
@@ -4134,6 +4163,13 @@ class OATHelper(QtWidgets.QMainWindow):
         if off is None:
             self.log("No saved DEC Home record. Set DEC to Home first and run SET HOME.", logging.WARNING); return
         off = int(off)
+        if self.dec_home_established:
+            # Not a position but a travel: replaying it from Home would walk DEC
+            # a whole shutdown move away and call that Home. GX DEC reads 0 here
+            # exactly as it does at power-on, so only this flag can tell.
+            self.log("DEC Home is already set in this session, so there is nothing to restore - the "
+                     "saved value is the travel from the power-on position, not a position. Use "
+                     "GO TO HOME to return to Home.", logging.WARNING); return
         if not self.dec_odometer_valid or self.dec_zero_shift != 0:
             self.log("DEC has already moved or been reset in this session. Restoring is only possible right after power-on (or right after a reconnect).", logging.WARNING); return
         ans = QtWidgets.QMessageBox.Yes if not confirm else QtWidgets.QMessageBox.question(
@@ -4178,6 +4214,7 @@ class OATHelper(QtWidgets.QMainWindow):
             self.dec_odometer_valid = True
             self.dec_manual_active = False
             self.wizard_dec_done = True
+            self.dec_home_established = True
             self.dec_manual_status.setText(_("✓ Saved DEC Home restored and SET HOME done - the current RA/DEC is Home(0)."))
             if cleared:
                 self.log(f"DEC homing offset (XSHD={cleared:+d}) was cleared to zero.", logging.WARNING)
@@ -4192,51 +4229,6 @@ class OATHelper(QtWidgets.QMainWindow):
         def finished():
             self.set_home_busy = False
             self._update_dec_restore_label()
-
-        self.run_async(job, done, err, finished)
-
-    def move_dec_to_saved_home(self):
-        """Move DEC only back to the final logical Home coordinate 0."""
-        if not self.indi.running:
-            self.log("An INDI connection is required.", logging.WARNING); return
-        if self.dec_jog_busy or self.dec_home_move_busy or self.home_busy:
-            self.log("Wait for the current move/home operation to finish before moving DEC to Home.", logging.WARNING); return
-
-        self.dec_home_move_busy = True
-        if hasattr(self, "dec_manual_status"):
-            self.dec_manual_status.setText(_("Moving to DEC Home(0)..."))
-
-        def job():
-            gx_start = self._wait_for_dec_idle(timeout=10.0)
-            current = int(gx_start["dec_steps"])
-            delta = -current
-            if delta != 0:
-                self.indi.meade(f"@MXd{delta}#")
-                gx_end = self._wait_for_dec_idle(timeout=90.0)
-            else:
-                gx_end = gx_start
-            final = int(gx_end["dec_steps"])
-            if final != 0:
-                raise RuntimeError(
-                    f"DEC Go To Home did not reach logical 0: final={final}. "
-                    "Firmware DEC limit may have clamped the move.")
-            return current, delta, final
-
-        def done(values):
-            current, delta, final = values
-            if hasattr(self, "dec_manual_status"):
-                self.dec_manual_status.setText(_("✓ Moved to the DEC Home(0) position."))
-            self.log("✓ DEC Home move done - logical 0")
-            self.logger.debug(
-                "DEC Home move: current=%+d delta=%+d final=%+d", current, delta, final)
-
-        def err(message):
-            if hasattr(self, "dec_manual_status"):
-                self.dec_manual_status.setText(_("✗ DEC Home move failed - check the log."))
-            self.log(f"DEC Home move failed: {message}", logging.ERROR)
-
-        def finished():
-            self.dec_home_move_busy = False
 
         self.run_async(job, done, err, finished)
 
