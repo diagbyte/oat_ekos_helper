@@ -153,9 +153,14 @@ The UI language follows the desktop the extension runs on, for the same reason.
 ## A normal session
 
 1. Power on, connect the mount in Ekos
-2. `Update HA automatically + apply to OAT`
-3. `Run RA AutoHome`
-4. `Restore saved DEC Home` — or aim DEC by hand — then `SET HOME`
+2. `Run RA AutoHome` — the Hall sensor homes RA on its own
+3. Bring DEC to Home. It has no sensor, so either:
+   - press **Restore DEC Home after power-on**, which replays the travel the
+     last shutdown move recorded, or
+   - jog DEC up by hand until it is at Home
+4. `SET HOME` — this is what defines Home(0) for **both** axes. The manual jog
+   and the restore button end in exactly the same place; the button only saves
+   you from counting the degrees. (Restore runs SET HOME for you.)
 5. Measure in Ekos PAA, then `Start PAA automatic correction`. Check the first
    move goes the right way — if an axis runs backwards, set `ALT_INVERT_DIR` /
    `AZ_INVERT_DIR` in `Configuration_local.hpp`, not a tool-side option
@@ -163,9 +168,15 @@ The UI language follows the desktop the extension runs on, for the same reason.
    change the axes a stored calibration was measured against
 7. Image. When finished: **End session (Home → shutdown position)** → power off
 
-Step 7 records the reverse of the move, so step 4 brings DEC straight back to
-Home in the next session. It is the step that is easy to skip and expensive to
-skip, which is why it is one button.
+The shutdown move goes to Home plus the configured angle, so at −33° it leaves
+DEC 33° below Home — and records +33° as the travel step 3 replays next time.
+Skipping it is what makes the next session manual again, which is why it is one
+button.
+
+Run RA AutoHome **before** setting DEC (step 2 before step 3). It finishes with
+the firmware's `setHome(false)`, which re-zeroes DEC wherever it happens to be:
+harmless while DEC has not moved since power-on, but it would discard a DEC Home
+you had just aimed by hand.
 
 The window opens in **simple mode** with three tabs. Everything else is behind
 the **Advanced** button in the status bar.
