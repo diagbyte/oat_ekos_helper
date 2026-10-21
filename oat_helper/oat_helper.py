@@ -1038,8 +1038,10 @@ class OATHelper(QtWidgets.QMainWindow):
             # Degrees relative to Home; negative DEC lowers the lens.
             "release_dec_deg": -30.0, "release_ra_deg": 0.0,
             "release_stop_tracking": True,
-            # Filled in once the working longitude encoding has been found.
-            "longitude_command": "",
+            # Which :Sg encoding this build understands, by label, once the
+            # probe has found it. Never the finished command: that would freeze
+            # the site the probe happened to run at into every later write.
+            "longitude_encoding": "",
             # Simple mode shows only the three tabs a normal imaging session
             # needs; everything else stays available behind the Advanced toggle.
             "simple_mode": True,
@@ -2876,12 +2878,15 @@ class OATHelper(QtWidgets.QMainWindow):
         lat_deg = int(abs(lat)); lat_min = int(round((abs(lat) - lat_deg) * 60))
         self.indi.meade(f"@St{'+' if lat >= 0 else '-'}{lat_deg:02d}*{lat_min:02d}#")
         time.sleep(0.2)
-        # Signed longitudes are "negative going east" in this firmware.
-        stored = self.cfg.get("longitude_command")
-        if stored:
-            self.indi.meade(stored)
-        else:
-            self.indi.meade(self._longitude_commands(lon)[0][1])
+        # Build the command from the longitude being written, using whichever
+        # encoding this firmware was found to understand. Firmware 1.13.22 and
+        # newer get the first candidate right, so the probe never runs there.
+        candidates = self._longitude_commands(lon)
+        wanted = self.cfg.get("longitude_encoding")
+        command = next((cmd for label, cmd in candidates if label == wanted), None)
+        if command is None:
+            command = candidates[0][1]
+        self.indi.meade(command)
         time.sleep(0.3)
         hours = int(lst_hours)
         minutes = int((lst_hours - hours) * 60)
@@ -2961,7 +2966,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 label, command, _d = self._calibrate_longitude(info["lon"], computed)
                 if label:
                     fixed_by = label
-                    self.cfg["longitude_command"] = command
+                    self.cfg["longitude_encoding"] = label
                     # LST is derived from the site, so set it again afterwards.
                     hours = int(computed)
                     minutes = int((computed - hours) * 60)
@@ -3093,7 +3098,7 @@ class OATHelper(QtWidgets.QMainWindow):
             # Site right but LST wrong: the longitude encoding is the usual culprit.
             label, command, _d = self._calibrate_longitude(lon, self._computed_lst_hours(lon))
             if label:
-                self.cfg["longitude_command"] = command
+                self.cfg["longitude_encoding"] = label
                 note = f"longitude written as '{label}'"
                 self._write_mount_lst(self._computed_lst_hours(lon))
                 lst = self._read_mount_lst()

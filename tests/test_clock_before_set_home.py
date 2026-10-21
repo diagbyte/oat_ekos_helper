@@ -62,7 +62,9 @@ pump(3.0)
 assert w.cfg.get("sync_clock_before_set_home", True) and w.clock_before_home_chk.isChecked()
 
 # ---- 1. SET HOME fixes a clock that is hours out, then stores Home ----------
-w.indi.meade("@Sg-127*00#")                          # 7 h out, as found in the field
+# :Sg is east-negative from 1.13.22 on, so the signed-as-is form is the
+# wrong one now - it puts the site at west 127, about 7 h out.
+w.indi.meade("@Sg+127*00#")                          # 7 h out, as found in the field
 before = w.mount_lst_drift_minutes()[0]
 lines = set_home_and_wait()
 after = w.mount_lst_drift_minutes()[0]
@@ -76,7 +78,8 @@ assert not warnings, warnings                        # no "clock is wrong" dialo
 w.clock_before_home_chk.setChecked(False)
 lon = w.site_angles()["lon"]
 # The fake mount derives LST from its longitude: 45' too far west = 3 min of LST.
-w.indi.meade("@Sg+126*14#")
+# East-negative, as :Sg has been since 1.13.22.
+w.indi.meade("@Sg-126*14#")
 print(f"mount now {w.mount_lst_drift_minutes()[0]:.1f} min out")
 warnings.clear()
 w.finish_dec_manual_home(); pump(1.5)

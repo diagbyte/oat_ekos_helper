@@ -47,7 +47,9 @@ def pump(seconds):
 pump(3.0)
 # put the mount's clock 7 hours out, the way it was found in the field
 # (a server left running by an earlier test may already hold a good value)
-w.indi.meade("&Sg-127*00#")   # the convention the mount does not want: 7 h out
+# Under 1.13.22 :Sg is east-negative, so "-127" is very nearly the real site.
+# The signed-as-is form is the one that is wrong now: it reads as west 127.
+w.indi.meade("&Sg+127*00#")   # the convention the mount does not want: 7 h out
 print("mount LST before sync:", w.indi.meade(":XGL#").strip(), "(stale on purpose)")
 drift = w.mount_lst_drift_minutes()
 print("drift detected: %.0f min" % drift[0])

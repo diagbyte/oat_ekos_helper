@@ -4,6 +4,7 @@ The symptom in the field was a date coming back as "109/19/26" and a sidereal
 time that jumped around, so the clock repair looked like it did nothing.
 """
 import os
+import re
 import shutil
 import sys
 import time
@@ -60,8 +61,10 @@ print("drift  : %.2f min" % drift)
 version = w.indi.meade(":GVN#").strip().rstrip("#")
 print("version reads clean:", version)
 
-assert not snapshot["date"].startswith("1"), "a stale reply leaked into the date"
-assert len(snapshot["date"]) == 8, f"unexpected date {snapshot['date']!r}"
+# A leaked reply shows up as an extra digit in front: "110/21/26" instead of
+# "10/21/26". Check the shape, not the first character - a date in October,
+# November or December legitimately starts with a 1.
+assert re.fullmatch(r"\d{2}/\d{2}/\d{2}", snapshot["date"]),     f"a stale reply leaked into the date: {snapshot['date']!r}"
 assert drift < 5, "the clock repair must land"
 assert version.lstrip("Vv")[0].isdigit(), "the channel is still out of step"
 

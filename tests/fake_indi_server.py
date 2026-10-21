@@ -5,6 +5,52 @@ DEV = "LX200 OpenAstroTech"
 WIRE_LOG = os.environ.get("WIRE_LOG")
 
 
+# Firmware older than 1.13.22 mis-mapped :Sg. Set FAKE_LEGACY_LONGITUDE=1 to
+# get that behaviour back, so the helper's encoding probe stays covered.
+LEGACY_LONGITUDE = os.environ.get("FAKE_LEGACY_LONGITUDE") == "1"
+
+
+def _wire_longitude_to_east(body):
+    """Firmware 1.13.22 (#304): the :Sg wire value is a WESTWARD count.
+
+    Signed or unsigned, it counts west from Greenwich, so east-positive is
+    `360 - value` wrapped into (-180, 180]. The reflection the firmware used to
+    use, `180 - value`, is the one that lands Greenwich on 180 and puts a site
+    exactly half a day of sidereal time from where it belongs.
+    """
+    text = body.replace("*", " ").replace(":", " ").strip()
+    sign = -1.0 if text.startswith("-") else 1.0
+    parts = text.lstrip("+-").split()
+    degrees = float(parts[0])
+    minutes = float(parts[1]) if len(parts) > 1 else 0.0
+    west = sign * (degrees + minutes / 60.0)
+    if LEGACY_LONGITUDE:
+        # What builds before 1.13.22 did: a signed value straight through, and
+        # the wrong reflection for an unsigned one.
+        return west if sign < 0 or text.startswith("+") else 180.0 - west
+    east = 360.0 - west
+    while east > 180.0:
+        east -= 360.0
+    while east <= -180.0:
+        east += 360.0
+    return east
+
+
+def _east_to_wire_longitude(east):
+    """How 1.13.22 writes it back on :Gg# - east-negative, Greenwich positive."""
+    west = -east
+    while west > 180.0:
+        west -= 360.0
+    while west <= -180.0:
+        west += 360.0
+    degrees = int(abs(west))
+    minutes = int(round((abs(west) - degrees) * 60.0))
+    if minutes == 60:
+        minutes, degrees = 0, degrees + 1
+    sign = "+" if (west >= 0 or (degrees == 0 and minutes == 0)) else "-"
+    return f"{sign}{degrees:03d}*{minutes:02d}"
+
+
 class Mount:
     def __init__(s):
         s.ra = 0; s.dec = 0; s.trk = 0; s.xshd = 0; s.xshr = -560
@@ -41,7 +87,7 @@ class Mount:
         if c == "GVN": return "V1.13.9#"
         if c == "GC": return f"{s.date}#"
         if c == "GG": return f"{s.offset}#"
-        if c == "Gg": return f"{s.lon}#"
+        if c == "Gg": return f"{_east_to_wire_longitude(s.lon_deg)}#"
         if c == "Gt": return f"{s.lat}#"
         if c.startswith("SC"):
             s.date = c[2:]
@@ -52,11 +98,7 @@ class Mount:
         if c.startswith("St"): s.lat = c[2:]; return "1"
         if c.startswith("Sg"):
             s.lon = c[2:]
-            body = c[2:].replace("*", " ").split()
-            deg = float(body[0]) + (float(body[1]) / 60.0 if len(body) > 1 else 0.0)
-            # This mount takes a signed value literally (east must be positive),
-            # and maps an unsigned one with the 0-360-going-west rule.
-            s.lon_deg = deg if c[2] in "+-" else 180.0 - deg
+            s.lon_deg = _wire_longitude_to_east(c[2:])
             s.lst_manual = None
             return "1"
         if c.startswith("SHL"):
