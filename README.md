@@ -165,6 +165,33 @@ the loaded profile describes, the pages that move it are disabled until you
 switch — one mount's DEC Home travel replayed on another is a move into the
 frame.
 
+### The first flash of a new board
+
+Detection cannot bootstrap a profile, only confirm one. A board with no
+firmware on it has no LX200 responder, so the INDI driver cannot even complete
+its handshake and `:GVP#` never happens. Nothing is blocked in that state —
+that is the point, because a board that cannot identify itself is a board that
+still has to be flashed.
+
+So the first time is deliberately manual:
+
+1. **Settings → Mount profile** → pick the mount, restart. The profile is
+   created from the defaults.
+2. **Firmware** tab: import a `Configuration_local.hpp` that defines the mount
+   (`OAE` for an Explorer, `OAM` for a Mount, neither for a Tracker), set the
+   PlatformIO environment (`oaeboardv1` for the Explorer's ESP32 board,
+   `mksgenlv21` and friends for the AVR boards) and the serial port.
+3. **BUILD → FLASH**.
+4. Reconnect. `:GVP#` now answers, and the profile is confirmed in the log.
+
+The environment picks the *board*; a define picks the *product*. The firmware
+returns `OpenAstroExplorer` from `:GVP#` only for `#define OAE` — build an
+Explorer board without it and you get a firmware that calls itself an
+OpenAstroTracker and applies Tracker travel limits to Explorer hardware. The
+helper compares the profile, the environment and that define before building
+and says so if they disagree; it asks the mount nothing, so the check works
+before the first flash, and it warns rather than refusing.
+
 `~/.config/oat-helper/` lives on the machine
 running the extension, so a laptop and a Pi keep separate copies. If you switch
 between them, turn on **Store the DEC Home offset on the mount EEPROM** on the

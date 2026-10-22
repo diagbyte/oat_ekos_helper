@@ -144,6 +144,10 @@ print("profile loaded:", oat_helper.PROFILE, "| mount reports: OpenAstroExplorer
 print("mismatch reported:", bool(warned))
 print("tabs disabled    :", blocked)
 assert warned, "a mount that is not the loaded profile must be called out"
+# The check runs on a startup timer and again on the connection hook, so one
+# power-up reaches it twice. A repeat is not news - and for a mismatch it would
+# mean a second modal dialog over the first.
+assert len(warned) == 1, f"the mismatch should be reported once, got {len(warned)}"
 for name in ("Home", "AutoPA", "Firmware"):
     assert name in blocked, f"{name} must be blocked on a profile mismatch, got {blocked}"
 print("guard: the wrong mount cannot be commanded")

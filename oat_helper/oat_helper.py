@@ -1002,6 +1002,9 @@ class OATHelper(QtWidgets.QMainWindow):
         # Set once :GVP# has been read and compared with the loaded profile.
         self.mount_model = ""
         self.profile_mismatch = False
+        # The last outcome announced, so the startup timer and the connection
+        # hook between them do not say the same thing twice.
+        self._profile_check_said = None
         self.dec_limits_firmware = None   # (lower_deg, upper_deg) from :XGDL#
         self.park_busy = False
         # DEC "odometer" for the sensorless axis.  :GX# DEC steps are relative
@@ -2307,16 +2310,29 @@ class OATHelper(QtWidgets.QMainWindow):
         def done(product):
             self.mount_model = product
             model = profile_name_from_product(product)
+            # The tab state is reapplied every time; only the talking is
+            # suppressed, so a repeat check still enforces the block.
+            fresh = self._profile_check_said != (product, model)
+            self._profile_check_said = (product, model)
             if not model:
-                self.logger.debug("Unrecognised :GVP# product %r; profile check skipped", product)
+                if not fresh:
+                    return
+                # Worth saying out loud: otherwise a mount that never identified
+                # itself looks exactly like one that matched.
+                self.log(f"The mount answered :GVP# with {product!r}, which is not a model this "
+                         f"knows, so the settings profile '{PROFILE}' could not be confirmed. "
+                         f"Nothing is blocked.", logging.WARNING)
                 return
             if model == PROFILE:
                 self.profile_mismatch = False
                 self._set_mount_tabs_enabled(True)
-                self.log(f"Mount reports {product}; settings profile '{PROFILE}' matches.")
+                if fresh:
+                    self.log(f"Mount reports {product}; settings profile '{PROFILE}' matches.")
                 return
             self.profile_mismatch = True
             self._set_mount_tabs_enabled(False)
+            if not fresh:
+                return
             self.log(f"Settings profile '{PROFILE}' is loaded but the mount reports {product}. "
                      f"Everything stored here - DEC Home travel, shutdown angle, travel limits, "
                      f"the PlatformIO environment - describes the other mount, so commanding this "
@@ -2329,7 +2345,19 @@ class OATHelper(QtWidgets.QMainWindow):
                   "pages that move it are disabled.\n\nPick '{model}' under Settings and restart "
                   "the extension.").format(profile=PROFILE, product=product, model=model))
 
-        self.run_async(job, done, lambda e: self.logger.debug("Profile check failed: %s", e))
+        def failed(exc):
+            # A board with no firmware cannot answer, and neither can a mount
+            # that is simply not connected yet - which is the normal state at
+            # startup, so only speak up when an answer was actually expected.
+            if self.indi.mount_is_connected() is True:
+                self.log(f"Could not read the mount model (:GVP#): {exc}. The settings profile "
+                         f"'{PROFILE}' could not be confirmed. Nothing is blocked; firmware "
+                         f"upload stays available, which is what a board with no firmware needs.",
+                         logging.WARNING)
+            else:
+                self.logger.debug("Profile check skipped, mount not connected: %s", exc)
+
+        self.run_async(job, done, failed)
 
     def refresh_firmware_version(self):
         def job():
@@ -6422,8 +6450,75 @@ class OATHelper(QtWidgets.QMainWindow):
         code,out=self._run_streamed([exe,"run","-e",env],cwd=src,timeout=1800)
         return code,msg+"\n"+pio+"\n"+out,str(src)
 
+    # :GVP# follows a define, not the board: MeadeCommandProcessor returns
+    # OpenAstroMount for OAM, OpenAstroExplorer for OAE and OpenAstroTracker
+    # otherwise. The PlatformIO environment selects the board instead, so the
+    # two are set separately and can disagree.
+    _PROFILE_DEFINE = {"OpenAstroMount": "OAM", "OpenAstroExplorer": "OAE"}
+
+    def _firmware_target_warnings(self, profile=None, env=None, defines=None):
+        """Check the profile, the PlatformIO environment and the product define agree.
+
+        Asks the mount nothing, so it works on a board with no firmware on it -
+        which is exactly when it matters, before the first flash.
+        """
+        profile = PROFILE if profile is None else profile
+        if env is None:
+            env = self.fw_env.currentText().strip() if hasattr(self, "fw_env") else ""
+        if defines is None:
+            defines = getattr(self, "imported_defines", None) or {}
+
+        wanted = self._PROFILE_DEFINE.get(profile)
+        present = [d for d in self._PROFILE_DEFINE.values() if d in defines]
+        # Only oaeboardv1 is an Explorer board today; match on the name so a
+        # renamed or added Explorer environment is still recognised.
+        env_is_oae = "oae" in env.lower()
+        out = []
+
+        if not defines:
+            out.append(_("No Configuration_local.hpp has been imported, so the OAM/OAE product "
+                         "define cannot be checked. The build decides what the mount reports for "
+                         ":GVP#, and without that define it reports OpenAstroTracker."))
+        elif wanted and wanted not in defines:
+            out.append(_("The '{profile}' profile is loaded, but the saved Configuration_local.hpp "
+                         "does not define {define}. The firmware would report itself as an "
+                         "OpenAstroTracker and use OpenAstroTracker travel limits on "
+                         "{profile} hardware.").format(profile=profile, define=wanted))
+        for other in present:
+            if other != wanted:
+                out.append(_("The saved Configuration_local.hpp defines {define}, which does not "
+                             "match the '{profile}' profile. The flashed mount would report a "
+                             "different model than these settings describe.").format(
+                                 define=other, profile=profile))
+
+        if profile == "OpenAstroExplorer" and env and not env_is_oae:
+            out.append(_("The '{profile}' profile is loaded but the PlatformIO environment is "
+                         "'{env}'. The Explorer board is the ESP32 'oaeboardv1' environment; an "
+                         "AVR environment cannot be uploaded to it.").format(
+                             profile=profile, env=env))
+        elif profile != "OpenAstroExplorer" and env_is_oae:
+            out.append(_("The PlatformIO environment '{env}' builds for the Explorer board, but "
+                         "the '{profile}' profile is loaded.").format(env=env, profile=profile))
+        return out
+
+    def _firmware_target_precheck(self):
+        """Warn when the build target disagrees with the profile; never refuse."""
+        warnings = self._firmware_target_warnings()
+        if not warnings:
+            return True
+        for line in warnings:
+            self._fw_log("WARNING: " + line)
+        body = "\n\n".join(f"\u2022 {line}" for line in warnings)
+        answer = QtWidgets.QMessageBox.question(
+            self, _("Check the build target"),
+            _("{warnings}\n\nContinue anyway?").format(warnings=body),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+        return answer == QtWidgets.QMessageBox.Yes
+
     def firmware_build(self):
-        self.save_config(); self.fw_output.clear(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); self._fw_log("BUILD: current local source + saved Configuration_local.hpp. No GitHub update.")
+        self.fw_output.clear()
+        if not self._firmware_target_precheck(): return
+        self.save_config(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); self._fw_log("BUILD: current local source + saved Configuration_local.hpp. No GitHub update.")
         def done(x): rc,out,src=x; self.fw_source.setText(src); self.save_config(); self._fw_log(out); self._fw_log("BUILD OK" if rc==0 else "BUILD FAILED"); self.refresh_firmware_environments()
         self.run_async(lambda:self._build_job(source,env),done,lambda e:self._fw_log(e))
 
@@ -6497,8 +6592,10 @@ class OATHelper(QtWidgets.QMainWindow):
         return code,msg+"\n"+pio+"\n"+out,str(src)
 
     def firmware_flash(self):
+        self.fw_output.clear()
+        if not self._firmware_target_precheck(): return
         if not self._flash_precheck(): return
-        self.save_config(); self.fw_output.clear(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); port=self.fw_port.text().strip(); self._fw_log("FLASH: no GitHub update.")
+        self.save_config(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); port=self.fw_port.text().strip(); self._fw_log("FLASH: no GitHub update.")
         def done(x):
             rc,out,src=x; self.fw_source.setText(src); self.save_config(); self._fw_log(out)
             self._fw_log("FLASH OK - the mount is reconnected automatically." if rc==0 else "FLASH FAILED")
@@ -6507,8 +6604,10 @@ class OATHelper(QtWidgets.QMainWindow):
                        lambda e:(self._fw_log(e), self._reconnect_mount_after_flash(False)))
 
     def firmware_build_flash(self):
+        self.fw_output.clear()
+        if not self._firmware_target_precheck(): return
         if not self._flash_precheck():return
-        self.save_config(); self.fw_output.clear(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); port=self.fw_port.text().strip(); self._fw_log("BUILD → FLASH: GitHub update is NOT performed.")
+        self.save_config(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); port=self.fw_port.text().strip(); self._fw_log("BUILD → FLASH: GitHub update is NOT performed.")
         def job():
             rc,out,src=self._build_job(source,env)
             if rc!=0:return rc,"BUILD FAILED\n"+out,src
