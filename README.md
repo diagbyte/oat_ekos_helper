@@ -192,6 +192,25 @@ helper compares the profile, the environment and that define before building
 and says so if they disagree; it asks the mount nothing, so the check works
 before the first flash, and it warns rather than refusing.
 
+Flashing always needs the USB cable — the firmware has no over-the-air upload
+path, so the Explorer's WiFi link cannot carry one.
+
+### Picking the upload port on a rig with a hub
+
+The upload port offers what is plugged in, stable names first. On a rig where
+the mount, a focuser and sometimes a GPS share one powered hub, `/dev/ttyUSB0`
+is handed out in enumeration order, and that order changes with the order the
+hub brings its devices up — so the mount moves between reboots. A
+`/dev/serial/by-id/…` name is built from the adapter's VID:PID:serial and stays
+put, which is why those are listed first.
+
+CH340 adapters often carry no serial number, so two of them collapse onto one
+by-id name. `/dev/serial/by-path/…` names the hub socket instead: pick that and
+keep the mount in the same socket. CP210x adapters, common on the Explorer's
+ESP32 board, usually do have a serial number, so by-id works for them.
+
+The port is stored per profile, so each mount keeps its own.
+
 `~/.config/oat-helper/` lives on the machine
 running the extension, so a laptop and a Pi keep separate copies. If you switch
 between them, turn on **Store the DEC Home offset on the mount EEPROM** on the

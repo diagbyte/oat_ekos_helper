@@ -1205,7 +1205,7 @@ class OATHelper(QtWidgets.QMainWindow):
             self.cfg.update({
                 "firmware_source_dir": self.fw_source.text().strip(),
                 "firmware_env": self.fw_env.currentText().strip(),
-                "firmware_port": self.fw_port.text().strip(),
+                "firmware_port": self.fw_port.currentText().strip(),
                 "expected_ra_spr": self.expected_ra_spr.value(),
                 "expected_dec_spr": self.expected_dec_spr.value(),
                 "expected_az_spr": self.expected_az_spr.value(),
@@ -1264,6 +1264,44 @@ class OATHelper(QtWidgets.QMainWindow):
         load_language(code)
         translate_widget_tree(self)
         self.log(f"UI language set to '{code}' (log messages stay in English)")
+
+    # Stable first: a by-id name is built from the chip's VID:PID:serial and
+    # survives a reboot, while ttyUSB0 is handed out in enumeration order and
+    # moves when a hub brings its devices up in a different order. by-path
+    # names which socket the device is in, which is the only way to tell two
+    # CH340 adapters apart when neither carries a serial number.
+    _PORT_GLOBS = ("serial/by-id/*", "serial/by-path/*",
+                   "ttyACM*", "ttyUSB*", "ttyAMA*")
+
+    @staticmethod
+    def _serial_port_candidates(dev="/dev"):
+        """Serial devices present now, stable names first, no duplicates."""
+        found = []
+        root = Path(dev)
+        for pattern in OATHelper._PORT_GLOBS:
+            try:
+                matches = sorted(root.glob(pattern), key=lambda p: p.name)
+            except Exception:
+                continue
+            for entry in matches:
+                path = str(entry)
+                if path not in found:
+                    found.append(path)
+        return found
+
+    def refresh_upload_ports(self):
+        """Repopulate the port list, keeping whatever is currently chosen."""
+        if not hasattr(self, "fw_port"):
+            return
+        current = self.fw_port.currentText().strip()
+        self.fw_port.blockSignals(True)
+        self.fw_port.clear()
+        self.fw_port.addItems(self._serial_port_candidates())
+        # A saved port for a mount that is unplugged right now has no entry,
+        # and must not be thrown away by the refresh.
+        self.fw_port.setCurrentText(current)
+        self.fw_port.blockSignals(False)
+        self.update_local_banner()
 
     @staticmethod
     def usb_serial_present():
@@ -5823,7 +5861,25 @@ class OATHelper(QtWidgets.QMainWindow):
         eg.addWidget(self.fw_tool_status,0,0,1,3); eg.addWidget(setup,0,3); eg.addWidget(detect,0,4)
         eg.addWidget(self.git_status,1,0,1,3); eg.addWidget(self.git_install_btn,1,3,1,2)
         v.addWidget(env)
-        f=QtWidgets.QGridLayout(); self.fw_source=QtWidgets.QLineEdit(self.cfg.get("firmware_source_dir","")); browse=QtWidgets.QPushButton("Browse"); browse.clicked.connect(self.select_firmware_source); self.fw_env=QtWidgets.QComboBox(); self.fw_env.setEditable(True); self.fw_env.addItems(["mksgenlv21","mksgenlv2","mksgenlv1","mega2560","ramps","esp32dev"]); self.fw_env.setCurrentText(self.cfg.get("firmware_env","mksgenlv21")); self.fw_port=QtWidgets.QLineEdit(self.cfg.get("firmware_port","/dev/ttyACM0")); self.fw_port.editingFinished.connect(self.update_local_banner); f.addWidget(QtWidgets.QLabel("Firmware source"),0,0); f.addWidget(self.fw_source,0,1,1,3); f.addWidget(browse,0,4); f.addWidget(QtWidgets.QLabel("PlatformIO env"),1,0); f.addWidget(self.fw_env,1,1); f.addWidget(QtWidgets.QLabel("Upload port"),1,2); f.addWidget(self.fw_port,1,3,1,2); v.addLayout(f)
+        f=QtWidgets.QGridLayout(); self.fw_source=QtWidgets.QLineEdit(self.cfg.get("firmware_source_dir","")); browse=QtWidgets.QPushButton("Browse"); browse.clicked.connect(self.select_firmware_source); self.fw_env=QtWidgets.QComboBox(); self.fw_env.setEditable(True)
+        # The environments platformio.ini actually defines. Replaced with the
+        # real list once a firmware source is on disk; until then this is what
+        # a first flash has to choose from, so oaeboardv1 has to be here.
+        self.fw_env.addItems(["mksgenlv21","mksgenlv2","mksgenlv1","ramps","oaeboardv1","esp32","rp2040_jackw01","rp2040_skr_pico"])
+        self.fw_env.setCurrentText(self.cfg.get("firmware_env","mksgenlv21"))
+        self.fw_port=QtWidgets.QComboBox(); self.fw_port.setEditable(True); self.fw_port.setMinimumWidth(240)
+        self.fw_port.addItems(self._serial_port_candidates())
+        self.fw_port.setCurrentText(self.cfg.get("firmware_port","/dev/ttyACM0"))
+        self.fw_port.setToolTip(_("The serial device to upload to. A /dev/serial/by-id name is "
+                                  "built from the adapter's serial number and stays the same "
+                                  "across reboots; ttyUSB0 is handed out in enumeration order and "
+                                  "moves when a hub starts its devices in a different order. For "
+                                  "two adapters that share a by-id name, use by-path and always "
+                                  "use the same hub socket."))
+        self.fw_port.lineEdit().editingFinished.connect(self.update_local_banner)
+        rescan_port=QtWidgets.QPushButton("Rescan"); rescan_port.setToolTip(_("Look for serial devices again"))
+        rescan_port.clicked.connect(self.refresh_upload_ports)
+        f.addWidget(QtWidgets.QLabel("Firmware source"),0,0); f.addWidget(self.fw_source,0,1,1,3); f.addWidget(browse,0,4); f.addWidget(QtWidgets.QLabel("PlatformIO env"),1,0); f.addWidget(self.fw_env,1,1); f.addWidget(QtWidgets.QLabel("Upload port"),1,2); f.addWidget(self.fw_port,1,3); f.addWidget(rescan_port,1,4); v.addLayout(f)
         sg=QtWidgets.QGroupBox("Firmware version (git)"); sgl=QtWidgets.QGridLayout(sg)
         self.fw_version_label=QtWidgets.QLabel("Version not checked"); self.fw_version_label.setStyleSheet("font-weight:600"); self.fw_version_label.setWordWrap(True)
         self.fw_mount_label=QtWidgets.QLabel("Mount firmware: -")
@@ -5866,7 +5922,7 @@ class OATHelper(QtWidgets.QMainWindow):
         text = _("Run this extension on the computer the OAT is plugged into: Build and Flash "
                  "drive PlatformIO over the USB serial port. Configuration editing, firmware "
                  "version management and diagnostics also work over the network.")
-        port = self.fw_port.text().strip() if hasattr(self, "fw_port") else ""
+        port = self.fw_port.currentText().strip() if hasattr(self, "fw_port") else ""
         if port and not Path(port).exists():
             text += "  " + _("Upload port {port} does not exist on this machine.").format(port=port)
         self.local_banner.setText(text)
@@ -6595,7 +6651,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self.fw_output.clear()
         if not self._firmware_target_precheck(): return
         if not self._flash_precheck(): return
-        self.save_config(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); port=self.fw_port.text().strip(); self._fw_log("FLASH: no GitHub update.")
+        self.save_config(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); port=self.fw_port.currentText().strip(); self._fw_log("FLASH: no GitHub update.")
         def done(x):
             rc,out,src=x; self.fw_source.setText(src); self.save_config(); self._fw_log(out)
             self._fw_log("FLASH OK - the mount is reconnected automatically." if rc==0 else "FLASH FAILED")
@@ -6607,7 +6663,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self.fw_output.clear()
         if not self._firmware_target_precheck(): return
         if not self._flash_precheck():return
-        self.save_config(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); port=self.fw_port.text().strip(); self._fw_log("BUILD → FLASH: GitHub update is NOT performed.")
+        self.save_config(); source=self.fw_source.text().strip(); env=self.fw_env.currentText().strip(); port=self.fw_port.currentText().strip(); self._fw_log("BUILD → FLASH: GitHub update is NOT performed.")
         def job():
             rc,out,src=self._build_job(source,env)
             if rc!=0:return rc,"BUILD FAILED\n"+out,src
