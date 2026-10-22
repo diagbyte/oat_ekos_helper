@@ -8,6 +8,8 @@ WIRE_LOG = os.environ.get("WIRE_LOG")
 # Firmware older than 1.13.22 mis-mapped :Sg. Set FAKE_LEGACY_LONGITUDE=1 to
 # get that behaviour back, so the helper's encoding probe stays covered.
 LEGACY_LONGITUDE = os.environ.get("FAKE_LEGACY_LONGITUDE") == "1"
+# Which mount the firmware was compiled for, as :GVP# reports it.
+MOUNT_MODEL = os.environ.get("FAKE_MOUNT_MODEL") or "OpenAstroTracker"
 
 
 def _wire_longitude_to_east(body):
@@ -85,6 +87,10 @@ class Mount:
         if c == "XGST": return "5.5#"
         if c == "XGAA": return "120|340#"
         if c == "GVN": return "V1.13.9#"
+        # :GVP# is how the firmware says which mount it was built for
+        # (MeadeCommandProcessor.cpp): OpenAstroTracker / OpenAstroMount /
+        # OpenAstroExplorer. FAKE_MOUNT_MODEL picks one.
+        if c == "GVP": return f"{MOUNT_MODEL}#"
         if c == "GC": return f"{s.date}#"
         if c == "GG": return f"{s.offset}#"
         if c == "Gg": return f"{_east_to_wire_longitude(s.lon_deg)}#"

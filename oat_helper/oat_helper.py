@@ -86,8 +86,70 @@ DEFAULT_DEVICE = "LX200 OpenAstroTech"
 CONFIG_DIR = Path.home() / ".config" / "oat-helper"
 DATA_DIR = Path.home() / ".local" / "share" / "oat-helper"
 LOG_DIR = DATA_DIR / "logs"
-CONFIG_FILE = CONFIG_DIR / "config.json"
-FIRMWARE_CONFIG = CONFIG_DIR / "Configuration_local.hpp"
+
+# Every stored setting belongs to one mount, so the whole config lives in a
+# profile named after what :GVP# reports. Only the pointer sits outside.
+PROFILES_DIR = CONFIG_DIR / "profiles"
+ACTIVE_PROFILE_FILE = CONFIG_DIR / "active_profile"
+# What a firmware built without OAM/OAE reports, and the name an existing flat
+# config migrates into.
+DEFAULT_PROFILE = "OpenAstroTracker"
+KNOWN_PROFILES = ("OpenAstroTracker", "OpenAstroMount", "OpenAstroExplorer")
+
+
+def profile_name_from_product(product):
+    """Map a :GVP# reply onto a profile name, or None if it says nothing useful."""
+    text = str(product or "").strip().rstrip("#").strip()
+    for known in KNOWN_PROFILES:
+        if known.lower() in text.lower():
+            return known
+    return None
+
+
+def active_profile():
+    try:
+        name = ACTIVE_PROFILE_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        name = ""
+    # Any directory name is accepted so a hand-made profile keeps working; only
+    # path separators are refused.
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return DEFAULT_PROFILE
+    return name
+
+
+def set_active_profile(name):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ACTIVE_PROFILE_FILE.write_text(str(name).strip(), encoding="utf-8")
+
+
+def _migrate_flat_config():
+    """Move a pre-profile config.json and its neighbours into the default profile."""
+    target = PROFILES_DIR / DEFAULT_PROFILE
+    flat_config = CONFIG_DIR / "config.json"
+    flat_hpp = CONFIG_DIR / "Configuration_local.hpp"
+    flat_backups = CONFIG_DIR / "backups"
+    if not (flat_config.exists() or flat_hpp.exists()):
+        return
+    if (target / "config.json").exists():
+        return                      # already migrated; leave whatever is there
+    target.mkdir(parents=True, exist_ok=True)
+    for source, name in ((flat_config, "config.json"),
+                         (flat_hpp, "Configuration_local.hpp")):
+        if source.exists():
+            try: shutil.move(str(source), str(target / name))
+            except Exception: pass
+    if flat_backups.is_dir() and not (target / "backups").exists():
+        try: shutil.move(str(flat_backups), str(target / "backups"))
+        except Exception: pass
+
+
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+_migrate_flat_config()
+PROFILE = active_profile()
+PROFILE_DIR = PROFILES_DIR / PROFILE
+CONFIG_FILE = PROFILE_DIR / "config.json"
+FIRMWARE_CONFIG = PROFILE_DIR / "Configuration_local.hpp"
 # Earlier releases shipped two extensions (oat_tools / oat_firmware); their
 # settings are migrated on first start.
 LEGACY_CONFIGS = (Path.home() / ".config" / "oat-tools" / "config.json",
@@ -96,7 +158,7 @@ LEGACY_FIRMWARE_CONFIGS = (Path.home() / ".config" / "oat-firmware" / "Configura
                            Path.home() / ".config" / "oat-tools" / "firmware" / "Configuration_local.hpp")
 
 APP_SLUG = "oat_helper"
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -937,6 +999,9 @@ class OATHelper(QtWidgets.QMainWindow):
         # serve instead of letting them silently return "0".
         self.firmware_version_text = ""
         self.firmware_version_num = 0
+        # Set once :GVP# has been read and compared with the loaded profile.
+        self.mount_model = ""
+        self.profile_mismatch = False
         self.dec_limits_firmware = None   # (lower_deg, upper_deg) from :XGDL#
         self.park_busy = False
         # DEC "odometer" for the sensorless axis.  :GX# DEC steps are relative
@@ -997,6 +1062,7 @@ class OATHelper(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(600, self.refresh_firmware_environment)  # also probes git
         QtCore.QTimer.singleShot(900, self.update_local_banner)
         QtCore.QTimer.singleShot(1200, self.refresh_version_panel)
+        QtCore.QTimer.singleShot(2600, self.check_mount_profile)
         if FIRMWARE_CONFIG.exists():
             QtCore.QTimer.singleShot(400, lambda: self._load_configuration_file(FIRMWARE_CONFIG, quiet=True))
 
@@ -1165,6 +1231,29 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log_box.appendPlainText(f"[{ts}] {msg}")
 
     # ------------------------ UI ------------------------
+    def change_profile(self):
+        """Record the chosen profile; the paths resolve at import, so restart."""
+        chosen = self.profile_box.currentData() or PROFILE
+        if chosen == PROFILE:
+            return
+        try:
+            self.save_config()
+        except Exception as exc:
+            self.logger.warning("config save before profile switch failed: %s", exc)
+        try:
+            set_active_profile(chosen)
+        except Exception as exc:
+            self.log(f"Could not store the profile choice: {exc}", logging.ERROR)
+            self.profile_box.setCurrentIndex(max(0, self.profile_box.findData(PROFILE)))
+            return
+        self.log(f"Settings profile set to '{chosen}'. Close and start the extension again "
+                 f"to load it; the current settings for '{PROFILE}' have been saved.",
+                 logging.WARNING)
+        QtWidgets.QMessageBox.information(
+            self, _("Mount profile"),
+            _("The profile is now '{profile}'.\n\nClose the extension and start it again from "
+              "Ekos to load that mount's settings.").format(profile=chosen))
+
     def change_language(self):
         """Switch UI language without restarting."""
         code = self.lang_box.currentData() or "auto"
@@ -1233,6 +1322,10 @@ class OATHelper(QtWidgets.QMainWindow):
                 self.tabs.addTab(widget, title)
             index = self.tabs.indexOf(current)
             self.tabs.setCurrentIndex(index if index >= 0 else 0)
+            # The tabs were just rebuilt, so a mismatch block has to be put back
+            # or switching to Advanced would hand back the pages it disabled.
+            if getattr(self, "profile_mismatch", False):
+                self._set_mount_tabs_enabled(False)
         translate_widget_tree(self)
         if hasattr(self, "advanced_toggle"):
             self.advanced_toggle.blockSignals(True)
@@ -1349,6 +1442,21 @@ class OATHelper(QtWidgets.QMainWindow):
         self.lang_box.setCurrentIndex(max(0, index))
         self.lang_box.currentIndexChanged.connect(self.change_language)
         cg.addWidget(self.lang_box)
+        # Which mount these settings belong to. Everything stored is about one
+        # mount, so this picks the whole config, not a preference inside it.
+        self.profile_box = QtWidgets.QComboBox()
+        names = list(KNOWN_PROFILES)
+        if PROFILE not in names:
+            names.append(PROFILE)
+        for name in names:
+            self.profile_box.addItem(name, name)
+        self.profile_box.setCurrentIndex(max(0, self.profile_box.findData(PROFILE)))
+        self.profile_box.setToolTip(_(
+            "Settings profile. Each mount keeps its own DEC Home travel, shutdown angle, "
+            "travel limits, Configuration_local.hpp and PlatformIO environment, so switching "
+            "mounts means switching profile. The extension has to restart to load it."))
+        self.profile_box.activated.connect(lambda _i: self.change_profile())
+        cg.addWidget(QtWidgets.QLabel("Mount profile")); cg.addWidget(self.profile_box)
         self.conn_settings.setVisible(False)
         self.settings_btn.toggled.connect(self.conn_settings.setVisible)
         self.settings_btn.toggled.connect(
@@ -2179,6 +2287,49 @@ class OATHelper(QtWidgets.QMainWindow):
     def _fw_at_least(self, version_num):
         """True when the firmware is new enough (unknown version -> allow)."""
         return self.firmware_version_num == 0 or self.firmware_version_num >= version_num
+
+    # Pages that command the mount. Blocked while the connected mount is not the
+    # one the loaded profile describes.
+    _MOUNT_TABS = ("Home", "AutoPA", "Monitor", "Axis cal", "Firmware")
+
+    def _set_mount_tabs_enabled(self, enabled):
+        if not hasattr(self, "tabs"):
+            return
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) in self._MOUNT_TABS:
+                self.tabs.setTabEnabled(index, bool(enabled))
+
+    def check_mount_profile(self):
+        """Compare what the mount says it is with the profile that was loaded."""
+        def job():
+            return str(self.indi.meade(":GVP#")).strip().rstrip("#").strip()
+
+        def done(product):
+            self.mount_model = product
+            model = profile_name_from_product(product)
+            if not model:
+                self.logger.debug("Unrecognised :GVP# product %r; profile check skipped", product)
+                return
+            if model == PROFILE:
+                self.profile_mismatch = False
+                self._set_mount_tabs_enabled(True)
+                self.log(f"Mount reports {product}; settings profile '{PROFILE}' matches.")
+                return
+            self.profile_mismatch = True
+            self._set_mount_tabs_enabled(False)
+            self.log(f"Settings profile '{PROFILE}' is loaded but the mount reports {product}. "
+                     f"Everything stored here - DEC Home travel, shutdown angle, travel limits, "
+                     f"the PlatformIO environment - describes the other mount, so commanding this "
+                     f"one from it would move the wrong distances. Switch the profile in Settings "
+                     f"and restart.", logging.ERROR)
+            QtWidgets.QMessageBox.warning(
+                self, _("Different mount"),
+                _("The loaded settings profile is '{profile}', but the mount reports "
+                  "{product}.\n\nEverything stored in a profile belongs to one mount, so the "
+                  "pages that move it are disabled.\n\nPick '{model}' under Settings and restart "
+                  "the extension.").format(profile=PROFILE, product=product, model=model))
+
+        self.run_async(job, done, lambda e: self.logger.debug("Profile check failed: %s", e))
 
     def refresh_firmware_version(self):
         def job():
@@ -3539,6 +3690,7 @@ class OATHelper(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(250, self.indi.request_properties)
             QtCore.QTimer.singleShot(900, self.check_oat_properties)
             QtCore.QTimer.singleShot(1400, self.refresh_firmware_version)
+            QtCore.QTimer.singleShot(1700, self.check_mount_profile)
         else:
             self.log("OAT mount disconnected; cached AutoPA properties were invalidated.", logging.WARNING)
             if self.pa_motion_active:
@@ -5692,7 +5844,7 @@ class OATHelper(QtWidgets.QMainWindow):
         self.local_banner.setText(text)
 
     def _configuration_backup_path(self):
-        d=CONFIG_DIR/"backups"; d.mkdir(parents=True,exist_ok=True); return d/f"Configuration_local_{datetime.now():%Y%m%d_%H%M%S}.hpp"
+        d=PROFILE_DIR/"backups"; d.mkdir(parents=True,exist_ok=True); return d/f"Configuration_local_{datetime.now():%Y%m%d_%H%M%S}.hpp"
 
     def _load_configuration_file(self,path,quiet=False):
         path=Path(path); text=path.read_text(encoding="utf-8",errors="replace"); defs={}
@@ -5720,7 +5872,7 @@ class OATHelper(QtWidgets.QMainWindow):
             FIRMWARE_CONFIG.write_text(ed.toPlainText(),encoding="utf-8"); self._load_configuration_file(FIRMWARE_CONFIG,quiet=True); self._sync_configuration_to_source(); self.log("Configuration saved and synchronized to local firmware source when available.")
 
     def restore_configuration_backup(self):
-        d=CONFIG_DIR/"backups"; fn,_filter=QtWidgets.QFileDialog.getOpenFileName(self,"Select a Configuration backup",str(d if d.exists() else CONFIG_DIR),"Header (*.hpp *.h);;All files (*)")
+        d=PROFILE_DIR/"backups"; fn,_filter=QtWidgets.QFileDialog.getOpenFileName(self,"Select a Configuration backup",str(d if d.exists() else PROFILE_DIR),"Header (*.hpp *.h);;All files (*)")
         if fn:
             if FIRMWARE_CONFIG.exists(): shutil.copy2(FIRMWARE_CONFIG,self._configuration_backup_path())
             shutil.copy2(fn,FIRMWARE_CONFIG); self._load_configuration_file(FIRMWARE_CONFIG,quiet=True); self._sync_configuration_to_source(); self.log(f"Configuration restored: {fn}")

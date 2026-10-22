@@ -143,7 +143,29 @@ banner and warns when the configured upload port does not exist here. Editing
 `Configuration_local.hpp`, managing firmware versions and reading diagnostics
 work from anywhere.
 
-**Settings are per machine.** `~/.config/oat-helper/` lives on the machine
+**Settings are per mount, per machine.** The same helper drives an
+OpenAstroTracker, an OpenAstroMount and an OpenAstroExplorer — they run the same
+firmware through the same INDI driver — but almost everything it stores belongs
+to one specific mount: the DEC Home travel, the shutdown angle, the travel
+limits, `Configuration_local.hpp`, which PlatformIO environment and port to
+flash. So the whole config lives under a profile named after what the mount
+reports for `:GVP#`:
+
+```
+~/.config/oat-helper/
+  active_profile
+  profiles/OpenAstroTracker/{config.json, Configuration_local.hpp, backups/}
+  profiles/OpenAstroExplorer/{config.json, Configuration_local.hpp, backups/}
+```
+
+Nothing is shared between profiles, and a new one starts from the defaults
+rather than copying another mount's numbers. Switch mounts under **Settings →
+Mount profile** and restart the extension. If the connected mount is not the one
+the loaded profile describes, the pages that move it are disabled until you
+switch — one mount's DEC Home travel replayed on another is a move into the
+frame.
+
+`~/.config/oat-helper/` lives on the machine
 running the extension, so a laptop and a Pi keep separate copies. If you switch
 between them, turn on **Store the DEC Home offset on the mount EEPROM** on the
 Home tab: the value then lives on the mount and both machines agree.

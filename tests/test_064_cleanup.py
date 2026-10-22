@@ -105,7 +105,9 @@ print("diag tab: read-only refresh restored, Go Home / Set Home quick buttons go
 
 assert w.factory_cmd.isReadOnly() and w.factory_cmd.text() == ":XFR#"
 w.save_config()
-cfg = json.loads(Path("/tmp/h064/.config/oat-helper/config.json").read_text())
+# Ask the app where its config lives: it moved under profiles/<mount model>/
+# once two mounts could share one machine.
+cfg = json.loads(oat_helper.CONFIG_FILE.read_text(encoding="utf-8"))
 assert "factory_reset_command" not in cfg
 print("factory reset command fixed to :XFR#")
 

@@ -38,9 +38,28 @@ def _point_config_at(port):
     Every test sets HOME (and, on Windows, USERPROFILE) before importing
     oat_helper, and writes its own config.json first, so merging the port in
     here reaches the app without any test-only hook in the application code.
+
+    The settings live under profiles/<model>/, so this resolves the active
+    profile the same way the app does and carries a test's flat config.json
+    across, exactly as the app's own migration would.
     """
-    cfg_path = Path.home() / ".config" / "oat-helper" / "config.json"
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    root = Path.home() / ".config" / "oat-helper"
+    try:
+        name = (root / "active_profile").read_text(encoding="utf-8").strip()
+    except Exception:
+        name = ""
+    profile = root / "profiles" / (name or "OpenAstroTracker")
+    profile.mkdir(parents=True, exist_ok=True)
+
+    cfg_path = profile / "config.json"
+    flat = root / "config.json"
+    if flat.exists() and not cfg_path.exists():
+        flat.replace(cfg_path)                 # same move the app would make
+    for extra in ("Configuration_local.hpp",):
+        source = root / extra
+        if source.exists() and not (profile / extra).exists():
+            source.replace(profile / extra)
+
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     except Exception:
