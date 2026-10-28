@@ -6229,9 +6229,38 @@ class OATHelper(QtWidgets.QMainWindow):
             m=re.match(r"\s*#define\s+([A-Za-z0-9_]+)\s+([^/]+?)\s*(?://.*)?$",line)
             if m: defs[m.group(1)]=m.group(2).strip()
         self.imported_defines=defs
-        if path!=FIRMWARE_CONFIG: shutil.copy2(path,FIRMWARE_CONFIG)
+        if path!=FIRMWARE_CONFIG:
+            # The file belongs to the active profile, so this replaces that
+            # mount's configuration - keep what was there. Editing already did;
+            # importing, which replaces the whole file, did not.
+            self._backup_current_configuration()
+            shutil.copy2(path,FIRMWARE_CONFIG)
         if not quiet: self.log(f"Configuration loaded: {path}")
         self.refresh_config_inspector()
+        self._after_configuration_changed()
+
+    def _backup_current_configuration(self):
+        """Copy the configuration now in place, if there is one."""
+        if not FIRMWARE_CONFIG.exists():
+            return None
+        try:
+            target = self._configuration_backup_path()
+            shutil.copy2(FIRMWARE_CONFIG, target)
+            self.logger.debug("Configuration backed up to %s", target)
+            return target
+        except Exception as exc:
+            self.log(f"Could not back up the current Configuration_local.hpp: {exc}",
+                     logging.WARNING)
+            return None
+
+    def _restore_configuration_from(self, source):
+        """Put a backup in place, keeping whatever it replaces."""
+        source = Path(source)
+        self._backup_current_configuration()
+        shutil.copy2(source, FIRMWARE_CONFIG)
+        self._load_configuration_file(FIRMWARE_CONFIG, quiet=True)
+        self._sync_configuration_to_source()
+        self.log(f"Configuration restored: {source}")
 
     def import_configuration_file(self):
         # Never unpack into `_`: that shadows the translation function for the
@@ -6252,7 +6281,7 @@ class OATHelper(QtWidgets.QMainWindow):
         d=PROFILE_DIR/"backups"; fn,_filter=QtWidgets.QFileDialog.getOpenFileName(self,"Select a Configuration backup",str(d if d.exists() else PROFILE_DIR),"Header (*.hpp *.h);;All files (*)")
         if fn:
             if FIRMWARE_CONFIG.exists(): shutil.copy2(FIRMWARE_CONFIG,self._configuration_backup_path())
-            shutil.copy2(fn,FIRMWARE_CONFIG); self._load_configuration_file(FIRMWARE_CONFIG,quiet=True); self._sync_configuration_to_source(); self.log(f"Configuration restored: {fn}")
+            self._restore_configuration_from(fn)
 
     def _define_value(self,key,default=None):
         raw=self.imported_defines.get(key)
@@ -6856,8 +6885,10 @@ class OATHelper(QtWidgets.QMainWindow):
         for other in present:
             if other != wanted:
                 out.append(_("The saved Configuration_local.hpp defines {define}, which does not "
-                             "match the '{profile}' profile. The flashed mount would report a "
-                             "different model than these settings describe.").format(
+                             "match the '{profile}' profile. Configuration_local.hpp belongs to "
+                             "the profile, so importing it here replaced this mount's own "
+                             "settings - check Restore backup. Make a profile for the other "
+                             "mount under Settings and import it there instead.").format(
                                  define=other, profile=profile))
 
         if profile == "OpenAstroExplorer" and env and not env_is_oae:
@@ -6867,7 +6898,10 @@ class OATHelper(QtWidgets.QMainWindow):
                              profile=profile, env=env))
         elif profile != "OpenAstroExplorer" and env_is_oae:
             out.append(_("The PlatformIO environment '{env}' builds for the Explorer board, but "
-                         "the '{profile}' profile is loaded.").format(env=env, profile=profile))
+                         "the '{profile}' profile is loaded. Everything here - this environment, "
+                         "the upload port, Configuration_local.hpp - is stored against "
+                         "'{profile}'. Make a profile for the Explorer under Settings, restart, "
+                         "and set it up there.").format(env=env, profile=profile))
         return out
 
     def _firmware_target_precheck(self):
