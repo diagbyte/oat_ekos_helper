@@ -195,6 +195,31 @@ before the first flash, and it warns rather than refusing.
 Flashing always needs the USB cable — the firmware has no over-the-air upload
 path, so the Explorer's WiFi link cannot carry one.
 
+Builds run with `PLATFORMIO_BUILD_SRC_FLAGS=-Wno-error`. Upstream compiles with
+`-Werror`, and the xtensa toolchain the Explorer's ESP32 build uses warns about
+things the AVR toolchain does not, so `oaeboardv1` fails from a clean checkout
+while the AVR environments succeed. GCC takes the last of `-Werror` and
+`-Wno-error`, so the promotion is off and the warnings still print. Editing
+`platformio.ini` instead would be undone by "Update to newest" and conflict on
+every source update.
+
+### Controls follow the firmware
+
+One Pi drives both mounts by swapping the board, so the same pages are offered
+to very different hardware. On connect the helper reads `:XGM#` — the
+firmware's own list of what it was built with — and disables what is not there,
+with the reason on the tooltip. A mount with no hall sensor on RA gets no RA
+AutoHome button; one built without the AutoPA steppers gets no AutoPA page.
+
+Two caveats are built in. `:XGM#` describes the **build**, not the hardware:
+`AZ_STEPPER_TYPE` and `ALT_STEPPER_TYPE` default to `STEPPER_TYPE_NONE` unless
+`Configuration_local.hpp` sets them, so a mount whose AutoPA motors are fitted
+still reports `NO_AZ_ALT` when the build left them out — and in that state the
+firmware will not drive them either, so the tooltip names the define to check.
+And firmwares up to 1.13.20 truncate the reply at the 64-byte response buffer,
+so nothing is gated there: not knowing is not the same as knowing there is
+nothing.
+
 ### Picking the upload port on a rig with a hub
 
 The upload port offers what is plugged in, stable names first. On a rig where

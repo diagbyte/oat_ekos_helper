@@ -999,6 +999,8 @@ class OATHelper(QtWidgets.QMainWindow):
         # serve instead of letting them silently return "0".
         self.firmware_version_text = ""
         self.firmware_version_num = 0
+        # Tokens from :XGM#, empty until a firmware new enough to answer it has.
+        self.mount_caps = set()
         # Set once :GVP# has been read and compared with the loaded profile.
         self.mount_model = ""
         self.profile_mismatch = False
@@ -1066,6 +1068,7 @@ class OATHelper(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(900, self.update_local_banner)
         QtCore.QTimer.singleShot(1200, self.refresh_version_panel)
         QtCore.QTimer.singleShot(2600, self.check_mount_profile)
+        QtCore.QTimer.singleShot(3000, self.refresh_mount_capabilities)
         if FIRMWARE_CONFIG.exists():
             QtCore.QTimer.singleShot(400, lambda: self._load_configuration_file(FIRMWARE_CONFIG, quiet=True))
 
@@ -1367,6 +1370,8 @@ class OATHelper(QtWidgets.QMainWindow):
             # or switching to Advanced would hand back the pages it disabled.
             if getattr(self, "profile_mismatch", False):
                 self._set_mount_tabs_enabled(False)
+            # The tabs were just rebuilt, so a capability block has to go back on.
+            self.apply_capability_gating()
         translate_widget_tree(self)
         if hasattr(self, "advanced_toggle"):
             self.advanced_toggle.blockSignals(True)
@@ -2339,6 +2344,91 @@ class OATHelper(QtWidgets.QMainWindow):
         for index in range(self.tabs.count()):
             if self.tabs.tabText(index) in self._MOUNT_TABS:
                 self.tabs.setTabEnabled(index, bool(enabled))
+
+    # Each entry: the token that means "present", the token that means "absent",
+    # and what the control is for. A mount answers exactly one of the pair.
+    _CAPABILITIES = (
+        ("HSAH", "NO_HSAH", "a hall sensor on RA"),
+        ("GPS", "NO_GPS", "a GPS module"),
+        ("GYRO", "NO_GYRO", "a digital level"),
+        ("FOC", "NO_FOC", "a focuser motor"),
+    )
+    # AutoPA reports which axes are motorised rather than a yes/no pair.
+    _AUTOPA_PRESENT = ("AUTO_AZ_ALT", "AUTO_AZ", "AUTO_ALT")
+
+    # :XGM# is truncated at the 64-byte response buffer up to 1.13.20, losing
+    # the trailing fields and the '#'. Reading it there would both mis-report
+    # the mount and desynchronise the next reply.
+    XGM_MIN_FIRMWARE = 11321
+
+    def refresh_mount_capabilities(self):
+        """Ask the firmware what it was built with, and follow the answer."""
+        if self.firmware_version_num and self.firmware_version_num < self.XGM_MIN_FIRMWARE:
+            self.logger.debug("Skipping :XGM#: firmware %s truncates it",
+                              self.firmware_version_text)
+            return
+
+        def job():
+            return str(self.indi.meade(":XGM#")).strip().rstrip("#").strip()
+
+        def done(reply):
+            # Documented to grow new fields, so never read by position.
+            caps = {part.strip() for part in reply.split(",") if part.strip()}
+            if not caps:
+                return
+            self.mount_caps = caps
+            self.apply_capability_gating()
+            missing = [what for present, absent, what in self._CAPABILITIES if absent in caps]
+            if not self._has_autopa():
+                missing.append("AutoPA motors")
+            if missing:
+                self.log("The firmware reports no " + ", ".join(missing)
+                         + "; the controls for those are disabled.")
+            else:
+                self.log("The firmware reports every feature this uses.")
+
+        self.run_async(job, done, lambda e: self.logger.debug(":XGM# failed: %s", e))
+
+    def _has_autopa(self):
+        """True unless the firmware explicitly said neither axis is motorised."""
+        if not self.mount_caps:
+            return True
+        if any(token in self.mount_caps for token in self._AUTOPA_PRESENT):
+            return True
+        return "NO_AZ_ALT" not in self.mount_caps
+
+    def _capability_missing(self, present, absent):
+        """Only an explicit absence counts; silence means not knowing."""
+        return bool(self.mount_caps) and absent in self.mount_caps and present not in self.mount_caps
+
+    def apply_capability_gating(self):
+        """Disable what the firmware says is not there, saying why."""
+        if not self.mount_caps:
+            return
+
+        if self._capability_missing("HSAH", "NO_HSAH"):
+            why = _("This firmware reports no hall sensor on RA (NO_HSAH from :XGM#), so it "
+                    "cannot home RA by itself. If the sensor is fitted, the build is missing "
+                    "USE_HALL_SENSOR_RA_AUTOHOME in Configuration_local.hpp.")
+            for widget in (getattr(self, "ra_home_btn", None),
+                           getattr(self, "autohome_on_connect", None),
+                           getattr(self, "wizard_autohome_btn", None)):
+                if widget is not None:
+                    widget.setEnabled(False)
+                    widget.setToolTip(why)
+            if getattr(self, "autohome_on_connect", None) is not None:
+                self.autohome_on_connect.setChecked(False)
+                self.cfg["autohome_ra_on_connect"] = False
+
+        if not self._has_autopa():
+            why = _("This firmware reports no AutoPA motors (NO_AZ_ALT from :XGM#). If they are "
+                    "fitted, the build is missing AZ_STEPPER_TYPE and ALT_STEPPER_TYPE in "
+                    "Configuration_local.hpp - they default to STEPPER_TYPE_NONE, and the "
+                    "firmware will not drive the motors either until those are set.")
+            for index in range(self.tabs.count()):
+                if self.tabs.tabText(index) == "AutoPA":
+                    self.tabs.setTabEnabled(index, False)
+                    self.tabs.setTabToolTip(index, why)
 
     def check_mount_profile(self):
         """Compare what the mount says it is with the profile that was loaded."""
@@ -3757,6 +3847,7 @@ class OATHelper(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(900, self.check_oat_properties)
             QtCore.QTimer.singleShot(1400, self.refresh_firmware_version)
             QtCore.QTimer.singleShot(1700, self.check_mount_profile)
+            QtCore.QTimer.singleShot(2000, self.refresh_mount_capabilities)
         else:
             self.log("OAT mount disconnected; cached AutoPA properties were invalidated.", logging.WARNING)
             if self.pa_motion_active:
@@ -6424,7 +6515,7 @@ class OATHelper(QtWidgets.QMainWindow):
                    ("Uploading", "Uploading"), ("Writing", "Writing"), ("Reading", "Verifying"),
                    ("avrdude", "avrdude"), ("esptool", "esptool"))
 
-    def _run_streamed(self, cmd, cwd=None, timeout=1800):
+    def _run_streamed(self, cmd, cwd=None, timeout=1800, env=None):
         """Run a command, forwarding every line to the GUI as it appears."""
         self.process_signals.started.emit(" ".join(str(c) for c in cmd))
         collected = []
@@ -6435,7 +6526,7 @@ class OATHelper(QtWidgets.QMainWindow):
         process = subprocess.Popen([str(c) for c in cmd], cwd=str(cwd) if cwd else None,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, bufsize=1, universal_newlines=True,
-                                   encoding="utf-8", errors="replace")
+                                   encoding="utf-8", errors="replace", env=env)
         self._fw_process = process
         deadline = time.time() + timeout
         try:
@@ -6500,11 +6591,31 @@ class OATHelper(QtWidgets.QMainWindow):
             _("{phase} - running {minutes:d}:{seconds:02d}").format(
                 phase=getattr(self, "_fw_phase", _("Working")), minutes=minutes, seconds=seconds))
 
+    # Upstream compiles with -Werror, and the xtensa toolchain the Explorer's
+    # ESP32 build uses warns where the AVR one does not, so oaeboardv1 fails
+    # from a clean checkout. GCC takes the last of -Werror and -Wno-error, so
+    # this turns the promotion off whether PlatformIO appends the variable to
+    # src_build_flags or replaces it. The warnings themselves still print.
+    PIO_WARNING_FLAGS = "-Wno-error"
+
+    def _pio_env(self):
+        """The real environment plus the flag that keeps warnings non-fatal."""
+        env = dict(os.environ)
+        # Anything already set comes first so it still wins where the two
+        # disagree; this only adds to it.
+        existing = env.get("PLATFORMIO_BUILD_SRC_FLAGS", "").strip()
+        env["PLATFORMIO_BUILD_SRC_FLAGS"] = (
+            f"{existing} {self.PIO_WARNING_FLAGS}".strip() if existing else self.PIO_WARNING_FLAGS)
+        return env
+
     def _build_job(self,source_text,env):
         exe,pio=self._install_platformio()
         src,msg=self._prepare_firmware_tree(source_text)
-        code,out=self._run_streamed([exe,"run","-e",env],cwd=src,timeout=1800)
-        return code,msg+"\n"+pio+"\n"+out,str(src)
+        code,out=self._run_streamed([exe,"run","-e",env],cwd=src,timeout=1800,env=self._pio_env())
+        note=(f"Building with PLATFORMIO_BUILD_SRC_FLAGS={self.PIO_WARNING_FLAGS}: upstream "
+              f"compiles with -Werror and the ESP32 toolchain warns where AVR does not, which "
+              f"stops oaeboardv1 building from a clean checkout. Warnings still print below.")
+        return code,msg+"\n"+note+"\n"+pio+"\n"+out,str(src)
 
     # :GVP# follows a define, not the board: MeadeCommandProcessor returns
     # OpenAstroMount for OAM, OpenAstroExplorer for OAE and OpenAstroTracker
@@ -6644,7 +6755,7 @@ class OATHelper(QtWidgets.QMainWindow):
     def _flash_job(self,source_text,env,port):
         exe,pio=self._install_platformio()
         src,msg=self._prepare_firmware_tree(source_text)
-        code,out=self._run_streamed([exe,"run","-e",env,"-t","upload","--upload-port",port],cwd=src,timeout=1800)
+        code,out=self._run_streamed([exe,"run","-e",env,"-t","upload","--upload-port",port],cwd=src,timeout=1800,env=self._pio_env())
         return code,msg+"\n"+pio+"\n"+out,str(src)
 
     def firmware_flash(self):

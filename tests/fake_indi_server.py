@@ -10,6 +10,12 @@ WIRE_LOG = os.environ.get("WIRE_LOG")
 LEGACY_LONGITUDE = os.environ.get("FAKE_LEGACY_LONGITUDE") == "1"
 # Which mount the firmware was compiled for, as :GVP# reports it.
 MOUNT_MODEL = os.environ.get("FAKE_MOUNT_MODEL") or "OpenAstroTracker"
+# The firmware version, which decides whether :XGM# can be trusted: builds
+# up to 1.13.20 truncate it at the 64-byte response buffer.
+FIRMWARE_VERSION = os.environ.get("FAKE_FIRMWARE_VERSION") or "V1.13.9"
+# What :XGM# reports. The default is a Tracker with no AutoPA and no hall sensor.
+MOUNT_CAPS = os.environ.get("FAKE_MOUNT_CAPS") or (
+    "Mega,NEMA|16|400,NEMA|16|400,NO_GPS,NO_AZ_ALT,NO_GYRO,NO_LCD,NO_FOC,NO_HSAH,NO_ENDSW")
 
 
 def _wire_longitude_to_east(body):
@@ -86,7 +92,13 @@ class Mount:
         if c == "XGR": return f"{s.ra_spd}#"
         if c == "XGST": return "5.5#"
         if c == "XGAA": return "120|340#"
-        if c == "GVN": return "V1.13.9#"
+        if c == "GVN": return f"{FIRMWARE_VERSION}#"
+        # :XGM# reports what the firmware was COMPILED with, not what the
+        # hardware has: AZ_STEPPER_TYPE and ALT_STEPPER_TYPE default to
+        # STEPPER_TYPE_NONE unless Configuration_local.hpp sets them, so a
+        # mount with AutoPA motors still reports NO_AZ_ALT if the build left
+        # them out. Fields are appended over time, so order is not a contract.
+        if c == "XGM": return f"{MOUNT_CAPS}#"
         # :GVP# is how the firmware says which mount it was built for
         # (MeadeCommandProcessor.cpp): OpenAstroTracker / OpenAstroMount /
         # OpenAstroExplorer. FAKE_MOUNT_MODEL picks one.
