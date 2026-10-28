@@ -2509,7 +2509,11 @@ class OATHelper(QtWidgets.QMainWindow):
                     "USE_HALL_SENSOR_RA_AUTOHOME in Configuration_local.hpp.")
             for widget in (getattr(self, "ra_home_btn", None),
                            getattr(self, "autohome_on_connect", None),
-                           getattr(self, "wizard_autohome_btn", None)):
+                           getattr(self, "wizard_autohome_btn", None),
+                           # The correction measures where the sensor trips
+                           # relative to true home; with no sensor there is
+                           # nothing to read and nothing to save.
+                           getattr(self, "ra_cal_group", None)):
                 if widget is not None:
                     widget.setEnabled(False)
                     widget.setToolTip(why)
