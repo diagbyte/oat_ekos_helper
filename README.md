@@ -154,16 +154,31 @@ reports for `:GVP#`:
 ```
 ~/.config/oat-helper/
   active_profile
-  profiles/OpenAstroTracker/{config.json, Configuration_local.hpp, backups/}
-  profiles/OpenAstroExplorer/{config.json, Configuration_local.hpp, backups/}
+  profiles/oat-pier/{config.json, Configuration_local.hpp, backups/}
+  profiles/oae-field/{config.json, Configuration_local.hpp, backups/}
 ```
 
-Nothing is shared between profiles, and a new one starts from the defaults
-rather than copying another mount's numbers. Switch mounts under **Settings →
-Mount profile** and restart the extension. If the connected mount is not the one
-the loaded profile describes, the pages that move it are disabled until you
-switch — one mount's DEC Home travel replayed on another is a move into the
-frame.
+A profile is named whatever you call it, and says which mount model it is for
+in a `model` field — `OpenAstroTracker`, `OpenAstroMount` or
+`OpenAstroExplorer`, as `:GVP#` reports them. Naming profiles after the model
+would allow only one per model: no second Tracker, and no way to keep a working
+configuration beside the one you are changing.
+
+Nothing is shared between profiles. **New profile…** starts from the defaults,
+because that is a different mount; **Copy this profile…** brings everything
+along, including the measured DEC Home travel, because that is the same mount
+set up differently. Both are in the **Settings → Mount profile** list, and
+loading one needs a restart.
+
+On connect the model is matched against the `model` field. One profile for the
+reported model is an answer and the helper names it; two are a question, so it
+names them both and changes nothing rather than picking a set of numbers for
+your mount. Until you switch, the pages that move the mount are disabled — one
+mount's DEC Home travel replayed on another is a move into the frame.
+
+The Firmware page stays reachable throughout: it holds the configuration
+editor, which is how a mix-up gets sorted out, and flashing does not move the
+mount. Its BUILD and FLASH buttons carry the restriction instead.
 
 ### The first flash of a new board
 
@@ -219,6 +234,18 @@ firmware will not drive them either, so the tooltip names the define to check.
 And firmwares up to 1.13.20 truncate the reply at the 64-byte response buffer,
 so nothing is gated there: not knowing is not the same as knowing there is
 nothing.
+
+### One page for the configuration and the flash
+
+`Configuration_local.hpp` used to be managed on its own tab and flashed from
+another, with its path shown nowhere — so with a profile per mount there was no
+telling which file was about to be uploaded. Both now live on the **Firmware**
+page, which names the file it would flash, when it was saved, and which of
+`OAE`/`OAM`/`AUTOPA_VERSION` it defines. The inspector that checks it against
+the expected motor profile is there too, collapsed.
+
+Building needs no cable; uploading does, so only the upload buttons turn off on
+a machine with no serial device.
 
 ### Picking the upload port on a rig with a hub
 

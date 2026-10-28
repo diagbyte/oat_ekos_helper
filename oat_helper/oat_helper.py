@@ -118,6 +118,32 @@ def active_profile():
     return name
 
 
+def profile_models():
+    """Every profile directory mapped to the mount model it is for."""
+    found = {}
+    try:
+        entries = sorted(p for p in PROFILES_DIR.glob("*") if p.is_dir())
+    except Exception:
+        return found
+    for entry in entries:
+        model = ""
+        try:
+            stored = json.loads((entry / "config.json").read_text(encoding="utf-8"))
+            model = str(stored.get("model") or "")
+        except Exception:
+            pass
+        # Profiles made before the field was added are named after their model.
+        found[entry.name] = model or (profile_name_from_product(entry.name) or "")
+    return found
+
+
+def profiles_for_model(model):
+    """The profiles that claim this mount model."""
+    if not model:
+        return []
+    return sorted(name for name, claimed in profile_models().items() if claimed == model)
+
+
 def set_active_profile(name):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     ACTIVE_PROFILE_FILE.write_text(str(name).strip(), encoding="utf-8")
@@ -1122,6 +1148,9 @@ class OATHelper(QtWidgets.QMainWindow):
             "firmware_ref": "develop", "firmware_last_fetch": "", "latest_release_tag": "",
             # Show the firmware tab even when no serial port is visible here.
             "always_show_firmware_tab": False,
+            # Which mount model this profile is for, as :GVP# reports it. Empty
+            # on a profile made before the field; the directory name covers that.
+            "model": "",
             # Build-specific, so they stay editable: the config inspector warns
             # when Configuration_local.hpp disagrees, and a 0.9° NEMA17 build
             # legitimately differs from a 1.8° one.
@@ -1237,9 +1266,47 @@ class OATHelper(QtWidgets.QMainWindow):
             self.log_box.appendPlainText(f"[{ts}] {msg}")
 
     # ------------------------ UI ------------------------
+    # Sentinels in the profile list, so making one does not need its own button
+    # in an already crowded row.
+    PROFILE_NEW = "\x00new"
+    PROFILE_CLONE = "\x00clone"
+
+    def _reset_profile_box(self):
+        index = self.profile_box.findData(PROFILE)
+        self.profile_box.setCurrentIndex(max(0, index))
+
     def change_profile(self):
         """Record the chosen profile; the paths resolve at import, so restart."""
         chosen = self.profile_box.currentData() or PROFILE
+        if chosen in (self.PROFILE_NEW, self.PROFILE_CLONE):
+            cloning = chosen == self.PROFILE_CLONE
+            title = _("Copy profile") if cloning else _("New profile")
+            prompt = (_("Name for the copy of '{profile}'. Everything comes with it, so use "
+                        "this for the same mount set up differently.").format(profile=PROFILE)
+                      if cloning else
+                      _("Name for the new profile. It starts from the defaults, so use this "
+                        "for a different mount."))
+            name, ok = QtWidgets.QInputDialog.getText(self, title, prompt)
+            self._reset_profile_box()
+            if not ok or not name.strip():
+                return
+            if cloning:
+                if self.clone_profile(name.strip()):
+                    QtWidgets.QMessageBox.information(
+                        self, title,
+                        _("Profile '{name}' created and selected.\n\nClose the extension and "
+                          "start it again to load it.").format(name=name.strip()))
+                return
+            chosen = name.strip()
+            target = PROFILES_DIR / chosen
+            if target.exists():
+                self.log(f"A profile called '{chosen}' already exists.", logging.ERROR)
+                return
+            try:
+                target.mkdir(parents=True)
+            except Exception as exc:
+                self.log(f"Could not create the profile: {exc}", logging.ERROR)
+                return
         if chosen == PROFILE:
             return
         try:
@@ -1250,7 +1317,7 @@ class OATHelper(QtWidgets.QMainWindow):
             set_active_profile(chosen)
         except Exception as exc:
             self.log(f"Could not store the profile choice: {exc}", logging.ERROR)
-            self.profile_box.setCurrentIndex(max(0, self.profile_box.findData(PROFILE)))
+            self._reset_profile_box()
             return
         self.log(f"Settings profile set to '{chosen}'. Close and start the extension again "
                  f"to load it; the current settings for '{PROFILE}' have been saved.",
@@ -1355,14 +1422,13 @@ class OATHelper(QtWidgets.QMainWindow):
             current = self.tabs.currentWidget()
             while self.tabs.count():
                 self.tabs.removeTab(0)
-            local = self.usb_serial_present() or bool(self.cfg.get("always_show_firmware_tab"))
             for widget, title, advanced in self.tab_specs:
                 if advanced and simple:
                     continue
-                if widget is getattr(self, "firmware_tab", None) and not local:
-                    # Build/Flash need the USB cable; hide the page on a remote
-                    # machine instead of letting it fail at the last step.
-                    continue
+                # The page used to be hidden without a serial device, but it now
+                # also holds Configuration_local.hpp, and editing that over the
+                # network is a documented case. The upload buttons carry the
+                # restriction instead.
                 self.tabs.addTab(widget, title)
             index = self.tabs.indexOf(current)
             self.tabs.setCurrentIndex(index if index >= 0 else 0)
@@ -1491,11 +1557,16 @@ class OATHelper(QtWidgets.QMainWindow):
         # Which mount these settings belong to. Everything stored is about one
         # mount, so this picks the whole config, not a preference inside it.
         self.profile_box = QtWidgets.QComboBox()
-        names = list(KNOWN_PROFILES)
+        known = profile_models()
+        names = sorted(known) or [PROFILE]
         if PROFILE not in names:
             names.append(PROFILE)
         for name in names:
-            self.profile_box.addItem(name, name)
+            model = known.get(name) or ""
+            self.profile_box.addItem(f"{name} ({model})" if model else name, name)
+        self.profile_box.insertSeparator(self.profile_box.count())
+        self.profile_box.addItem(_("New profile..."), self.PROFILE_NEW)
+        self.profile_box.addItem(_("Copy this profile..."), self.PROFILE_CLONE)
         self.profile_box.setCurrentIndex(max(0, self.profile_box.findData(PROFILE)))
         self.profile_box.setToolTip(_(
             "Settings profile. Each mount keeps its own DEC Home travel, shutdown angle, "
@@ -1522,7 +1593,6 @@ class OATHelper(QtWidgets.QMainWindow):
         self.monitor_tab = self._as_page(self.make_monitor_tab())
         self.axis_tab = self._as_page(self.make_axis_cal_tab())
         self.diag_tab = self._as_page(self.make_diag_tab())
-        self.fwconfig_tab = self._as_page(self.make_config_tab())
         self.firmware_tab = self._as_page(self.make_firmware_tab())
         self.tab_specs = [
             (self.wizard_tab, "Session setup", False),
@@ -1531,7 +1601,6 @@ class OATHelper(QtWidgets.QMainWindow):
             (self.monitor_tab, "Monitor", True),
             (self.axis_tab, "Axis cal", True),
             (self.diag_tab, "Diag", True),
-            (self.fwconfig_tab, "FW config", True),
             (self.firmware_tab, "Firmware", True),
         ]
         for tab, name, _adv in self.tab_specs:
@@ -2336,7 +2405,11 @@ class OATHelper(QtWidgets.QMainWindow):
 
     # Pages that command the mount. Blocked while the connected mount is not the
     # one the loaded profile describes.
-    _MOUNT_TABS = ("Home", "AutoPA", "Monitor", "Axis cal", "Firmware")
+    # Firmware is not here on purpose: flashing does not move the mount, the
+    # build target check already warns about building the wrong one, and the
+    # page holds the configuration editor - which is how a mismatch gets sorted
+    # out. Its BUILD and FLASH buttons are disabled instead.
+    _MOUNT_TABS = ("Home", "AutoPA", "Monitor", "Axis cal")
 
     def _set_mount_tabs_enabled(self, enabled):
         if not hasattr(self, "tabs"):
@@ -2344,6 +2417,30 @@ class OATHelper(QtWidgets.QMainWindow):
         for index in range(self.tabs.count()):
             if self.tabs.tabText(index) in self._MOUNT_TABS:
                 self.tabs.setTabEnabled(index, bool(enabled))
+        self.refresh_build_buttons()
+
+    def refresh_build_buttons(self):
+        """Building and uploading need the cable and the right profile."""
+        if not hasattr(self, "build_btn"):
+            return
+        local = self.usb_serial_present() or bool(self.cfg.get("always_show_firmware_tab"))
+        mismatch = bool(getattr(self, "profile_mismatch", False))
+        if mismatch:
+            why = _("The mount connected is not the one profile '{profile}' describes, so this "
+                    "would build or upload the wrong mount's firmware. The configuration below "
+                    "stays editable.").format(profile=PROFILE)
+        elif not local:
+            why = _("Uploading drives PlatformIO over the USB serial port, so it only works on "
+                    "the computer the mount is plugged into. Editing the configuration here "
+                    "still works.")
+        else:
+            why = ""
+        for button in (self.build_btn, self.flash_btn, self.build_flash_btn):
+            # A build needs no cable, only an upload does.
+            needs_cable = button is not self.build_btn
+            blocked = mismatch or (needs_cable and not local)
+            button.setEnabled(not blocked)
+            button.setToolTip(why if blocked else "")
 
     # Each entry: the token that means "present", the token that means "absent",
     # and what the control is for. A mount answers exactly one of the pair.
@@ -2430,6 +2527,38 @@ class OATHelper(QtWidgets.QMainWindow):
                     self.tabs.setTabEnabled(index, False)
                     self.tabs.setTabToolTip(index, why)
 
+    def profile_model(self):
+        """Which mount model the loaded profile is for, '' when it does not say."""
+        stored = str(self.cfg.get("model") or "").strip()
+        # A profile from before the field is named after its model.
+        return stored or (profile_name_from_product(PROFILE) or "")
+
+    def clone_profile(self, name):
+        """Copy this profile under a new name and make it active.
+
+        Everything comes along, the measured DEC Home travel included: this is
+        the same mount set up differently, unlike a new profile, which starts
+        from the defaults because that is different hardware.
+        """
+        name = str(name or "").strip()
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            self.log(f"Not a usable profile name: {name!r}", logging.ERROR)
+            return False
+        target = PROFILES_DIR / name
+        if target.exists():
+            self.log(f"A profile called '{name}' already exists.", logging.ERROR)
+            return False
+        try:
+            self.save_config()
+            shutil.copytree(PROFILE_DIR, target)
+            set_active_profile(name)
+        except Exception as exc:
+            self.log(f"Could not clone the profile: {exc}", logging.ERROR)
+            return False
+        self.log(f"Profile '{PROFILE}' copied to '{name}', which is now selected. "
+                 f"Close and start the extension again to load it.", logging.WARNING)
+        return True
+
     def check_mount_profile(self):
         """Compare what the mount says it is with the profile that was loaded."""
         def job():
@@ -2451,7 +2580,7 @@ class OATHelper(QtWidgets.QMainWindow):
                          f"knows, so the settings profile '{PROFILE}' could not be confirmed. "
                          f"Nothing is blocked.", logging.WARNING)
                 return
-            if model == PROFILE:
+            if model == self.profile_model():
                 self.profile_mismatch = False
                 self._set_mount_tabs_enabled(True)
                 if fresh:
@@ -2461,17 +2590,30 @@ class OATHelper(QtWidgets.QMainWindow):
             self._set_mount_tabs_enabled(False)
             if not fresh:
                 return
+            # One profile for this model is an answer; two are a question, and
+            # guessing between them would pick a set of numbers for the mount.
+            candidates = [name for name in profiles_for_model(model) if name != PROFILE]
+            if len(candidates) == 1:
+                advice = _("Select '{name}' under Settings and restart the extension.").format(
+                    name=candidates[0])
+            elif candidates:
+                advice = _("These profiles are for a {model}: {names}. Pick one under Settings "
+                           "and restart the extension.").format(
+                               model=model, names=", ".join(candidates))
+            else:
+                advice = _("No profile here is for a {model} yet. Make one under Settings and "
+                           "restart the extension.").format(model=model)
             self.log(f"Settings profile '{PROFILE}' is loaded but the mount reports {product}. "
                      f"Everything stored here - DEC Home travel, shutdown angle, travel limits, "
                      f"the PlatformIO environment - describes the other mount, so commanding this "
-                     f"one from it would move the wrong distances. Switch the profile in Settings "
-                     f"and restart.", logging.ERROR)
+                     f"one from it would move the wrong distances. "
+                     + str(advice), logging.ERROR)
             QtWidgets.QMessageBox.warning(
                 self, _("Different mount"),
                 _("The loaded settings profile is '{profile}', but the mount reports "
                   "{product}.\n\nEverything stored in a profile belongs to one mount, so the "
-                  "pages that move it are disabled.\n\nPick '{model}' under Settings and restart "
-                  "the extension.").format(profile=PROFILE, product=product, model=model))
+                  "pages that move it are disabled.\n\n{advice}").format(
+                      profile=PROFILE, product=product, advice=advice))
 
         def failed(exc):
             # A board with no firmware cannot answer, and neither can a mount
@@ -5897,18 +6039,69 @@ class OATHelper(QtWidgets.QMainWindow):
 
 
     # ------------------------ firmware maintenance ------------------------
-    def make_config_tab(self):
-        w=QtWidgets.QWidget(); v=QtWidgets.QVBoxLayout(w)
-        row=QtWidgets.QHBoxLayout(); imp=QtWidgets.QPushButton("Import Configuration_local.hpp"); imp.clicked.connect(self.import_configuration_file); edit=QtWidgets.QPushButton("Edit / save settings"); edit.clicked.connect(self.edit_configuration_file); restore=QtWidgets.QPushButton("Restore backup"); restore.clicked.connect(self.restore_configuration_backup); refresh=QtWidgets.QPushButton("Refresh inspector"); refresh.clicked.connect(self.refresh_config_inspector)
+    def make_config_group(self):
+        """The configuration that will be flashed, on the page that flashes it."""
+        w=QtWidgets.QGroupBox("Configuration"); v=QtWidgets.QVBoxLayout(w)
+        # Which file, in plain sight: with a profile per mount this is the
+        # difference between flashing the Tracker's settings and the Explorer's.
+        self.config_path_label=QtWidgets.QLabel(); self.config_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.config_path_label.setWordWrap(True); self.config_path_label.setObjectName("mono")
+        v.addWidget(self.config_path_label)
+        self.config_state_label=QtWidgets.QLabel(); self.config_state_label.setObjectName("hint")
+        self.config_state_label.setWordWrap(True); v.addWidget(self.config_state_label)
+        row=QtWidgets.QHBoxLayout()
+        self.config_import_btn=imp=QtWidgets.QPushButton("Import Configuration_local.hpp"); imp.clicked.connect(self.import_configuration_file)
+        self.config_edit_btn=edit=QtWidgets.QPushButton("Edit / save settings"); edit.clicked.connect(self.edit_configuration_file)
+        self.config_restore_btn=restore=QtWidgets.QPushButton("Restore backup"); restore.clicked.connect(self.restore_configuration_backup)
+        refresh=QtWidgets.QPushButton("Refresh inspector"); refresh.clicked.connect(self.refresh_config_inspector)
         for b in (imp,edit,restore,refresh): row.addWidget(b)
         row.addStretch(1); v.addLayout(row)
+        self.inspector_toggle=QtWidgets.QToolButton(); self.inspector_toggle.setCheckable(True)
+        self.inspector_toggle.setText(_("\u25b8 Inspector"))
+        self.inspector_toggle.setToolTip(_("What the saved Configuration_local.hpp defines, and "
+                                           "whether it agrees with the expected motor profile"))
+        v.addWidget(self.inspector_toggle, 0, QtCore.Qt.AlignLeft)
+        self.inspector_body=QtWidgets.QWidget(); iv=QtWidgets.QVBoxLayout(self.inspector_body)
+        iv.setContentsMargins(0,0,0,0)
+        self.inspector_body.setVisible(False)
+        def _toggle(on):
+            self.inspector_body.setVisible(on)
+            self.inspector_toggle.setText(_("\u25be Inspector") if on else _("\u25b8 Inspector"))
+            if on: self.refresh_config_inspector()
+        self.inspector_toggle.toggled.connect(_toggle)
         exp=QtWidgets.QGroupBox("Expected motor profile"); eg=QtWidgets.QGridLayout(exp)
         self.expected_ra_spr=QtWidgets.QSpinBox(); self.expected_dec_spr=QtWidgets.QSpinBox(); self.expected_az_spr=QtWidgets.QSpinBox(); self.expected_alt_spr=QtWidgets.QSpinBox(); self.expected_autopa_ver=QtWidgets.QSpinBox()
         vals=[("RA steps/rev",self.expected_ra_spr,"expected_ra_spr",400),("DEC steps/rev",self.expected_dec_spr,"expected_dec_spr",400),("AZ steps/rev",self.expected_az_spr,"expected_az_spr",200),("ALT steps/rev",self.expected_alt_spr,"expected_alt_spr",200),("AutoPA version",self.expected_autopa_ver,"expected_autopa_version",2)]
         for i,(name,ctl,key,d) in enumerate(vals): ctl.setRange(1,5000); ctl.setValue(int(self.cfg.get(key,d))); eg.addWidget(QtWidgets.QLabel(name),i//3,(i%3)*2); eg.addWidget(ctl,i//3,(i%3)*2+1)
-        v.addWidget(exp)
-        self.config_text=QtWidgets.QPlainTextEdit(); self.config_text.setReadOnly(True); self.config_text.setMinimumHeight(140); self.config_text.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)); v.addWidget(self.config_text,1)
+        iv.addWidget(exp)
+        self.config_text=QtWidgets.QPlainTextEdit(); self.config_text.setReadOnly(True); self.config_text.setMinimumHeight(140); self.config_text.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)); iv.addWidget(self.config_text,1)
+        v.addWidget(self.inspector_body)
+        self.refresh_config_path_label()
         return w
+
+    def refresh_config_path_label(self):
+        """Say which file a build would use, and what is in it."""
+        if not hasattr(self, "config_path_label"):
+            return
+        self.config_path_label.setText(str(FIRMWARE_CONFIG))
+        if not FIRMWARE_CONFIG.exists():
+            self.config_state_label.setText(_(
+                "Not imported yet for profile '{profile}'. A build would use the firmware's own "
+                "defaults, which report the mount as an OpenAstroTracker.").format(profile=PROFILE))
+            return
+        try:
+            stat = FIRMWARE_CONFIG.stat()
+            when = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            size = f"{stat.st_size/1024:.1f} KB"
+        except Exception:
+            when, size = "?", "?"
+        marks = [name for name in ("OAE", "OAM") if name in (self.imported_defines or {})]
+        marks += [t for t in ("AUTOPA_VERSION", "USE_HALL_SENSOR_RA_AUTOHOME")
+                  if t in (self.imported_defines or {})]
+        tail = (" \u00b7 " + ", ".join(marks)) if marks else ""
+        self.config_state_label.setText(
+            _("profile '{profile}' \u00b7 saved {when} \u00b7 {size}").format(
+                profile=PROFILE, when=when, size=size) + tail)
 
     def make_diag_tab(self):
         w=QtWidgets.QWidget(); v=QtWidgets.QVBoxLayout(w)
@@ -5938,6 +6131,9 @@ class OATHelper(QtWidgets.QMainWindow):
             "border:1px solid #b45309; border-radius:5px; padding:5px 8px; color:#b45309; font-weight:600;")
         v.addWidget(self.local_banner)
         note=QtWidgets.QLabel("Firmware updates and Build/Flash are independent. If a local source exists you can edit only Configuration_local.hpp and rebuild/upload without a GitHub update. PlatformIO is installed into the user area when needed."); note.setWordWrap(True); v.addWidget(note)
+        # The configuration comes first: it is what you check before pressing
+        # BUILD, and until it moved here its path was nowhere in the UI.
+        v.addWidget(self.make_config_group())
         env=QtWidgets.QGroupBox("Build environment"); eg=QtWidgets.QGridLayout(env)
         self.fw_tool_status=QtWidgets.QLabel("PlatformIO: not checked")
         # git is what makes firmware updates incremental; without it every
@@ -5992,7 +6188,7 @@ class OATHelper(QtWidgets.QMainWindow):
         hint.setWordWrap(True); hint.setStyleSheet("color:palette(dark);font-size:11px")
         sgl.addWidget(hint,4,0,1,5)
         v.addWidget(sg)
-        bg=QtWidgets.QGroupBox("Local Build / Upload"); bh=QtWidgets.QHBoxLayout(bg); b1=QtWidgets.QPushButton("BUILD current settings"); b1.clicked.connect(self.firmware_build); b2=QtWidgets.QPushButton("FLASH current settings"); b2.clicked.connect(self.firmware_flash); b3=QtWidgets.QPushButton("BUILD → FLASH"); b3.setObjectName("primary"); b3.clicked.connect(self.firmware_build_flash); bh.addWidget(b1); bh.addWidget(b2); bh.addWidget(b3); bh.addStretch(1); v.addWidget(bg)
+        bg=QtWidgets.QGroupBox("Local Build / Upload"); bh=QtWidgets.QHBoxLayout(bg); self.build_btn=b1=QtWidgets.QPushButton("BUILD current settings"); b1.clicked.connect(self.firmware_build); self.flash_btn=b2=QtWidgets.QPushButton("FLASH current settings"); b2.clicked.connect(self.firmware_flash); self.build_flash_btn=b3=QtWidgets.QPushButton("BUILD → FLASH"); b3.setObjectName("primary"); b3.clicked.connect(self.firmware_build_flash); bh.addWidget(b1); bh.addWidget(b2); bh.addWidget(b3); bh.addStretch(1); v.addWidget(bg)
         prog=QtWidgets.QHBoxLayout(); prog.setSpacing(6)
         self.fw_progress=QtWidgets.QProgressBar(); self.fw_progress.setRange(0,100); self.fw_progress.setValue(0)
         self.fw_progress.setVisible(False); self.fw_progress.setMaximumHeight(16)
@@ -6007,6 +6203,7 @@ class OATHelper(QtWidgets.QMainWindow):
         return w
 
     def update_local_banner(self):
+        self.refresh_build_buttons()
         """Say plainly that flashing only works on the machine holding the USB cable."""
         if not hasattr(self, "local_banner"):
             return
@@ -6020,6 +6217,11 @@ class OATHelper(QtWidgets.QMainWindow):
 
     def _configuration_backup_path(self):
         d=PROFILE_DIR/"backups"; d.mkdir(parents=True,exist_ok=True); return d/f"Configuration_local_{datetime.now():%Y%m%d_%H%M%S}.hpp"
+
+    def _after_configuration_changed(self):
+        """Keep the shown path and its summary in step with the file."""
+        try: self.refresh_config_path_label()
+        except Exception as exc: self.logger.debug("config path label: %s", exc)
 
     def _load_configuration_file(self,path,quiet=False):
         path=Path(path); text=path.read_text(encoding="utf-8",errors="replace"); defs={}

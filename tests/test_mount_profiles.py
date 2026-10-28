@@ -148,9 +148,22 @@ assert warned, "a mount that is not the loaded profile must be called out"
 # power-up reaches it twice. A repeat is not news - and for a mismatch it would
 # mean a second modal dialog over the first.
 assert len(warned) == 1, f"the mismatch should be reported once, got {len(warned)}"
-for name in ("Home", "AutoPA", "Firmware"):
+for name in ("Home", "AutoPA"):
     assert name in blocked, f"{name} must be blocked on a profile mismatch, got {blocked}"
-print("guard: the wrong mount cannot be commanded")
+
+# Firmware is deliberately NOT blocked as a tab: it holds the configuration
+# editor, which is how a mix-up gets sorted out, and flashing does not move the
+# mount. The protection moved to the buttons that would build or upload the
+# wrong mount's firmware.
+assert "Firmware" not in blocked, (
+    "blocking the whole Firmware tab would also block editing the configuration")
+print("build enabled  :", w.build_btn.isEnabled(), "| flash:", w.flash_btn.isEnabled(),
+      "| edit:", w.config_edit_btn.isEnabled())
+assert not w.build_btn.isEnabled(), "building the wrong mount's firmware must be blocked"
+assert not w.flash_btn.isEnabled(), "uploading the wrong mount's firmware must be blocked"
+assert not w.build_flash_btn.isEnabled(), "BUILD -> FLASH must be blocked too"
+assert w.config_edit_btn.isEnabled(), "editing the configuration must stay available"
+print("guard: the wrong mount cannot be commanded or flashed")
 
 shutdown_app(app, w, _server)
 print("mount profiles keep the two mounts apart")
