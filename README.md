@@ -154,19 +154,23 @@ reports for `:GVP#`:
 ```
 ~/.config/oat-helper/
   active_profile
-  profiles/oat-pier/{config.json, Configuration_local.hpp, backups/}
-  profiles/oae-field/{config.json, Configuration_local.hpp, backups/}
+  profiles/<your name>/{config.json, Configuration_local.hpp, backups/}
+
+# for example, with one of each mount:
+  profiles/oat-pier/...
+  profiles/oae-field/...
 ```
 
-A profile is named whatever you call it, and says which mount model it is for
+The names above are examples — call them whatever you like. A profile is named
+whatever you call it, and says which mount model it is for
 in a `model` field — `OpenAstroTracker`, `OpenAstroMount` or
 `OpenAstroExplorer`, as `:GVP#` reports them. Naming profiles after the model
 would allow only one per model: no second Tracker, and no way to keep a working
 configuration beside the one you are changing.
 
-The loaded profile is named in the header, beside the firmware version —
-`oae-field (OpenAstroExplorer)` — and that badge is also where you switch,
-copy or make one. Every stored setting belongs to one mount, so which profile
+The loaded profile is named in the header, beside the firmware version — the
+name you gave it, with the mount it is for in brackets — and that badge is
+also where you switch, copy or make one. Every stored setting belongs to one mount, so which profile
 is loaded should never be something you have to go looking for.
 
 Nothing is shared between profiles. **New profile…** asks which mount it is
