@@ -37,6 +37,11 @@ adjustment, SET HOME, and one button to close the session down.*
 - Plate-solve axis calibration that can write steps/degree back to the mount,
   plus the one-off motor direction checks
 - Read-only diagnostics
+- A settings profile per mount, named in the header, so a Tracker and an
+  Explorer can share one computer without sharing numbers measured on one
+  of them
+- Controls that follow what the firmware reports it was built with (`:XGM#`),
+  so a mount with no hall sensor is not offered an RA AutoHome button
 
 The window opens with three tabs; the rest is behind the **Advanced** toggle.
 
@@ -65,7 +70,9 @@ the OAT is plugged into (the tab hides itself elsewhere).
 
 ![The Firmware tab](images/firmware.png)
 
-*Firmware maintenance. The banner says plainly when this machine is not the one
+*Firmware maintenance, with the configuration it would flash at the top — the
+full path, which profile it belongs to, when it was saved, and whether it
+defines `OAE`/`OAM`. The banner says plainly when this machine is not the one
 holding the USB cable, and it warns that the configured upload port is absent
 rather than failing halfway through a flash.*
 
@@ -172,6 +179,13 @@ The loaded profile is named in the header, beside the firmware version — the
 name you gave it, with the mount it is for in brackets — and that badge is
 also where you switch, copy or make one. Every stored setting belongs to one mount, so which profile
 is loaded should never be something you have to go looking for.
+
+![The profile badge and its menu](images/profiles.png)
+
+*The badge names the loaded profile and the mount it is for; its menu lists the
+others, ticks the current one, and is where profiles are made and copied.
+Loading a different one needs a restart, because the pages read their settings
+as they are built.*
 
 Nothing is shared between profiles. **New profile…** asks which mount it is
 for and starts from the defaults for that mount — an Explorer profile begins

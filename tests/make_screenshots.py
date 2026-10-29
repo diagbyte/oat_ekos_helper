@@ -24,10 +24,17 @@ REPO = Path(__file__).resolve().parent.parent
 HOME = Path(tempfile.gettempdir()) / "oat_helper_screenshots"
 
 shutil.rmtree(HOME, ignore_errors=True)
-(HOME / ".config" / "oat-helper").mkdir(parents=True, exist_ok=True)
-(HOME / ".config" / "oat-helper" / "config.json").write_text(
-    '{"simple_mode": true, "always_show_firmware_tab": true,'
-    ' "magnetic_declination_deg": -8.0, "log_visible": true}', encoding="utf-8")
+CFG = HOME / ".config" / "oat-helper"
+# Two profiles, so the header badge and its menu have something to show. The
+# names are only illustrations - a profile is called whatever its owner calls
+# it, and the mount it is for lives in the `model` field.
+SHOWN = '{"simple_mode": true, "always_show_firmware_tab": true,'         ' "magnetic_declination_deg": -8.0, "log_visible": true, "model": "%s"}'
+for shown_name, shown_model in (("oat-pier", "OpenAstroTracker"),
+                                ("oae-field", "OpenAstroExplorer")):
+    profile = CFG / "profiles" / shown_name
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "config.json").write_text(SHOWN % shown_model, encoding="utf-8")
+(CFG / "active_profile").write_text("oat-pier", encoding="utf-8")
 (HOME / ".config" / "kstarsrc").write_text(
     "[General]\nLogToFile=true\nLogToDefault=false\n", encoding="utf-8")
 
@@ -88,6 +95,40 @@ pump(1.5)
 window.refresh_mount_monitor()
 shot("monitor", "Monitor", settle=2.5)
 shot("firmware", "Firmware")
+
+
+def shot_profile_menu(name="profiles"):
+    """The header badge with its menu open.
+
+    A menu is its own top-level window, so grabbing the main window misses it;
+    the two are painted into one image instead, the menu where it drops.
+    """
+    from PyQt5 import QtCore, QtGui
+    badge = window.profile_btn
+    window.refresh_profile_badge()
+    window._fill_profile_menu()
+    menu = window.profile_menu
+    menu.adjustSize()
+    pump(0.3)
+
+    header_h = badge.mapTo(window, QtCore.QPoint(0, badge.height())).y() + 6
+    header = window.grab(QtCore.QRect(0, 0, window.width(), header_h))
+    body = menu.grab()
+    left = badge.mapTo(window, QtCore.QPoint(0, 0)).x()
+
+    canvas = QtGui.QPixmap(window.width(), header_h + body.height() + 8)
+    canvas.fill(QtGui.QColor("#f0f0f0"))
+    painter = QtGui.QPainter(canvas)
+    painter.drawPixmap(0, 0, header)
+    painter.drawPixmap(left, header_h + 2, body)
+    painter.end()
+
+    path = OUT / f"{name}.png"
+    canvas.save(str(path))
+    print(f"  {path.relative_to(REPO)}  {path.stat().st_size / 1024:.0f} KB")
+
+
+shot_profile_menu()
 
 shutdown_app(app, window, server)
 print("done")
