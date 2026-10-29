@@ -164,6 +164,11 @@ in a `model` field — `OpenAstroTracker`, `OpenAstroMount` or
 would allow only one per model: no second Tracker, and no way to keep a working
 configuration beside the one you are changing.
 
+The loaded profile is named in the header, beside the firmware version —
+`oae-field (OpenAstroExplorer)` — and that badge is also where you switch,
+copy or make one. Every stored setting belongs to one mount, so which profile
+is loaded should never be something you have to go looking for.
+
 Nothing is shared between profiles. **New profile…** starts from the defaults,
 because that is a different mount; **Copy this profile…** brings everything
 along, including the measured DEC Home travel, because that is the same mount

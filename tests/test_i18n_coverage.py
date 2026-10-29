@@ -52,7 +52,9 @@ ALLOWED = re.compile(
     r"|^:?X?[A-Za-z]{1,6}[#0-9]"                      # Meade commands
     r"|INDI|LX200|OAT|PlatformIO|GX|RA|DEC|ALT|AZ|HA|LST|PAA|EEPROM|FW|git|Ekos|KStars"
     r"|SET HOME|GO TO HOME|PARK|UNPARK|STOP|BUILD|FLASH|RESET|Host|Port|develop|master"
-    r"|Configuration_local|hpp|Language|auto|English|한국어|Home|Mount|Settings|Advanced")
+    r"|Configuration_local|hpp|Language|auto|English|한국어|Home|Mount|Settings|Advanced"
+    # Profile names and the mount models the firmware reports are data.
+    r"|OpenAstro")
 
 missing = []
 for widget in w.findChildren(QtWidgets.QWidget):

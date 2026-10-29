@@ -1272,12 +1272,49 @@ class OATHelper(QtWidgets.QMainWindow):
     PROFILE_CLONE = "\x00clone"
 
     def _reset_profile_box(self):
+        if not hasattr(self, "profile_box"):
+            return
         index = self.profile_box.findData(PROFILE)
         self.profile_box.setCurrentIndex(max(0, index))
 
+    def refresh_profile_badge(self):
+        """Name the loaded profile and the mount it is for."""
+        if not hasattr(self, "profile_btn"):
+            return
+        model = self.profile_model() if hasattr(self, "cfg") else ""
+        # A profile from before the model field is named after its model; saying
+        # it twice reads like a mistake.
+        self.profile_btn.setText(
+            f"{PROFILE} ({model})" if model and model != PROFILE else f"{PROFILE}")
+        self.profile_btn.setToolTip(_(
+            "The settings profile in use. Each mount keeps its own DEC Home travel, shutdown "
+            "position, travel limits, Configuration_local.hpp and PlatformIO environment, so "
+            "switching mounts means switching profile. Click to switch, copy or make one; the "
+            "extension has to restart to load it."))
+
+    def _fill_profile_menu(self):
+        """Rebuild the menu each time: profiles can appear while this runs."""
+        self.profile_menu.clear()
+        known = profile_models()
+        for name in sorted(known) or [PROFILE]:
+            model = known.get(name) or ""
+            action = self.profile_menu.addAction(f"{name} ({model})" if model else name)
+            action.setCheckable(True)
+            action.setChecked(name == PROFILE)
+            action.triggered.connect(lambda _c, n=name: self.select_profile(n))
+        self.profile_menu.addSeparator()
+        self.profile_menu.addAction(_("New profile..."),
+                                    lambda: self.select_profile(self.PROFILE_NEW))
+        self.profile_menu.addAction(_("Copy this profile..."),
+                                    lambda: self.select_profile(self.PROFILE_CLONE))
+
     def change_profile(self):
         """Record the chosen profile; the paths resolve at import, so restart."""
-        chosen = self.profile_box.currentData() or PROFILE
+        self.select_profile(self.profile_box.currentData() or PROFILE)
+
+    def select_profile(self, chosen):
+        """Switch to, create or copy a profile. Loading it needs a restart."""
+        chosen = chosen or PROFILE
         if chosen in (self.PROFILE_NEW, self.PROFILE_CLONE):
             cloning = chosen == self.PROFILE_CLONE
             title = _("Copy profile") if cloning else _("New profile")
@@ -1531,6 +1568,17 @@ class OATHelper(QtWidgets.QMainWindow):
         hb.addWidget(self.mount_status)
         hb.addWidget(self._vline())
         hb.addWidget(self.fw_label)
+        hb.addWidget(self._vline())
+        # Every stored setting belongs to one mount; this says which one, in
+        # the row that already answers "what am I connected to".
+        self.profile_btn = QtWidgets.QToolButton()
+        self.profile_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.profile_btn.setObjectName("profileBadge")
+        self.profile_menu = QtWidgets.QMenu(self.profile_btn)
+        self.profile_btn.setMenu(self.profile_menu)
+        self.profile_menu.aboutToShow.connect(self._fill_profile_menu)
+        self.refresh_profile_badge()
+        hb.addWidget(self.profile_btn)
         hb.addStretch(1)
         hb.addWidget(self.advanced_toggle)
         hb.addWidget(self.settings_btn)
@@ -1567,8 +1615,9 @@ class OATHelper(QtWidgets.QMainWindow):
         self.lang_box.setCurrentIndex(max(0, index))
         self.lang_box.currentIndexChanged.connect(self.change_language)
         cg.addWidget(self.lang_box)
-        # Which mount these settings belong to. Everything stored is about one
-        # mount, so this picks the whole config, not a preference inside it.
+        # Which mount these settings belong to. Kept here as well as in the
+        # header badge, because this row is where connection settings live and
+        # the profile decides which of them are loaded.
         self.profile_box = QtWidgets.QComboBox()
         known = profile_models()
         names = sorted(known) or [PROFILE]
@@ -2633,6 +2682,7 @@ class OATHelper(QtWidgets.QMainWindow):
                     self.logger.warning("could not store the adopted model: %s", exc)
                 self.profile_mismatch = False
                 self._set_mount_tabs_enabled(True)
+                self.refresh_profile_badge()
                 if fresh:
                     self.log(f"Profile '{PROFILE}' had no mount model recorded; it is now set "
                              f"to {model} from what the mount reports.", logging.WARNING)
