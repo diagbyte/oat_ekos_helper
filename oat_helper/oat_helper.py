@@ -1335,10 +1335,6 @@ class OATHelper(QtWidgets.QMainWindow):
                           "start it again to load it.").format(name=name.strip()))
                 return
             chosen = name.strip()
-            target = PROFILES_DIR / chosen
-            if target.exists():
-                self.log(f"A profile called '{chosen}' already exists.", logging.ERROR)
-                return
             # Ask now rather than leaving it blank: an unlabelled profile used
             # to read as a mismatch against every mount. A connected mount is
             # the obvious default, since that is usually why a profile is made.
@@ -1350,12 +1346,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 options, options.index(current), False)
             if not ok:
                 return
-            try:
-                target.mkdir(parents=True)
-                (target / "config.json").write_text(
-                    json.dumps({"model": model}), encoding="utf-8")
-            except Exception as exc:
-                self.log(f"Could not create the profile: {exc}", logging.ERROR)
+            if not self.create_profile(chosen, model):
                 return
         if chosen == PROFILE:
             return
@@ -2622,6 +2613,49 @@ class OATHelper(QtWidgets.QMainWindow):
         stored = str(self.cfg.get("model") or "").strip()
         # A profile from before the field is named after its model.
         return stored or (profile_name_from_product(PROFILE) or "")
+
+    # The PlatformIO environment each mount is built with, from platformio.ini
+    # on the firmware repository. Stated for all three rather than leaning on
+    # load_config's default being the AVR one: which board a mount uses is a
+    # fact about the firmware, not a fallback.
+    _MODEL_ENV = {
+        "OpenAstroTracker": "mksgenlv21",
+        "OpenAstroMount": "mksgenlv21",
+        "OpenAstroExplorer": "oaeboardv1",
+    }
+
+    def defaults_for_model(self, model):
+        """What a profile for this mount should start with.
+
+        Only what the model itself settles. Everything else comes from
+        load_config's defaults, and anything measured on one mount - the DEC
+        Home travel above all - is left unset, because it cannot be guessed for
+        another.
+        """
+        seed = {"model": str(model or "")}
+        env = self._MODEL_ENV.get(model)
+        if env:
+            seed["firmware_env"] = env
+        return seed
+
+    def create_profile(self, name, model):
+        """Make a profile for a mount, seeded for it. Loading it needs a restart."""
+        name = str(name or "").strip()
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            self.log(f"Not a usable profile name: {name!r}", logging.ERROR)
+            return False
+        target = PROFILES_DIR / name
+        if target.exists():
+            self.log(f"A profile called '{name}' already exists.", logging.ERROR)
+            return False
+        try:
+            target.mkdir(parents=True)
+            (target / "config.json").write_text(
+                json.dumps(self.defaults_for_model(model)), encoding="utf-8")
+        except Exception as exc:
+            self.log(f"Could not create the profile: {exc}", logging.ERROR)
+            return False
+        return True
 
     def clone_profile(self, name):
         """Copy this profile under a new name and make it active.

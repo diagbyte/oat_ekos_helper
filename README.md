@@ -169,10 +169,13 @@ The loaded profile is named in the header, beside the firmware version —
 copy or make one. Every stored setting belongs to one mount, so which profile
 is loaded should never be something you have to go looking for.
 
-Nothing is shared between profiles. **New profile…** starts from the defaults,
-because that is a different mount; **Copy this profile…** brings everything
-along, including the measured DEC Home travel, because that is the same mount
-set up differently. Both are in the **Settings → Mount profile** list, and
+Nothing is shared between profiles. **New profile…** asks which mount it is
+for and starts from the defaults for that mount — an Explorer profile begins
+with the `oaeboardv1` environment rather than the AVR one, so a first build
+does not run into the build-target warning. What was measured on one mount,
+the DEC Home travel above all, is left unset, because it cannot be guessed for
+another. **Copy this profile…** brings everything along, that travel included,
+because that is the same mount set up differently. Both are in the **Settings → Mount profile** list, and
 loading one needs a restart.
 
 On connect the model is matched against the `model` field. One profile for the
