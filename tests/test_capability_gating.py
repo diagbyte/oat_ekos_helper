@@ -81,7 +81,12 @@ PROBE = """
     # relative to true home. With no sensor there is nothing to read.
     print("RA_CAL_ENABLED:", bool(w.ra_cal_group.isEnabled()))
     autopa = [i for i in range(w.tabs.count()) if w.tabs.tabText(i) == "AutoPA"]
+    # The page stays open whatever the firmware says, so the reason can be
+    # read; the groups that drive the motors carry the state.
     print("AUTOPA_TAB_ENABLED:", bool(autopa) and w.tabs.isTabEnabled(autopa[0]))
+    print("AUTOPA_MOVES_ENABLED:", bool(w.pa_manual_group.isEnabled()))
+    tip = (w.tabs.tabToolTip(autopa[0]) if autopa else "").split(".")[0]
+    print("AUTOPA_TAB_TIP:", tip[:90])
 """
 
 failures = []
@@ -102,8 +107,8 @@ def expect(label, out, **wanted):
 # --- 1. a plain Tracker: no AutoPA motors, no hall sensor ----------------
 out = run_case("tracker", TRACKER, MODERN, PROBE)
 values = expect("plain Tracker on 1.13.22", out,
-                AUTOHOME_ENABLED="False", ONCONNECT_ENABLED="False", AUTOPA_TAB_ENABLED="False",
-                RA_CAL_ENABLED="False")
+                AUTOHOME_ENABLED="False", ONCONNECT_ENABLED="False", AUTOPA_TAB_ENABLED="True",
+                AUTOPA_MOVES_ENABLED="False", RA_CAL_ENABLED="False")
 tip = values.get("AUTOHOME_TIP", "")
 print(f"    tooltip: {tip.strip()[:110]}")
 if "HSAH" not in tip:
@@ -115,14 +120,15 @@ if "Configuration_local" not in tip and "firmware" not in tip.lower():
 out = run_case("loaded", LOADED, MODERN, PROBE)
 expect("AutoPA + hall sensor on 1.13.22", out,
        AUTOHOME_ENABLED="True", ONCONNECT_ENABLED="True", AUTOPA_TAB_ENABLED="True",
-       RA_CAL_ENABLED="True")
+       AUTOPA_MOVES_ENABLED="True", RA_CAL_ENABLED="True")
 
 # --- 3. firmware too old to trust :XGM# ----------------------------------
 # The same mount that reported nothing above must keep every control here:
 # the reply is truncated on this firmware, so the helper does not know.
 out = run_case("old", TRACKER, OLD, PROBE)
 values = expect("same answer on 1.13.20", out,
-                AUTOHOME_ENABLED="True", ONCONNECT_ENABLED="True", AUTOPA_TAB_ENABLED="True")
+                AUTOHOME_ENABLED="True", ONCONNECT_ENABLED="True", AUTOPA_TAB_ENABLED="True",
+                AUTOPA_MOVES_ENABLED="True")
 if values.get("CAPS", "").strip() != "(none)":
     failures.append("capabilities must not be recorded from a firmware that truncates them")
 

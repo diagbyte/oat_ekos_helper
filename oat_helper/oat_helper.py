@@ -1302,8 +1302,21 @@ class OATHelper(QtWidgets.QMainWindow):
             if target.exists():
                 self.log(f"A profile called '{chosen}' already exists.", logging.ERROR)
                 return
+            # Ask now rather than leaving it blank: an unlabelled profile used
+            # to read as a mismatch against every mount. A connected mount is
+            # the obvious default, since that is usually why a profile is made.
+            options = list(KNOWN_PROFILES)
+            current = profile_name_from_product(getattr(self, "mount_model", "")) or options[0]
+            model, ok = QtWidgets.QInputDialog.getItem(
+                self, _("New profile"),
+                _("Which mount is '{name}' for?").format(name=chosen),
+                options, options.index(current), False)
+            if not ok:
+                return
             try:
                 target.mkdir(parents=True)
+                (target / "config.json").write_text(
+                    json.dumps({"model": model}), encoding="utf-8")
             except Exception as exc:
                 self.log(f"Could not create the profile: {exc}", logging.ERROR)
                 return
@@ -2174,7 +2187,7 @@ class OATHelper(QtWidgets.QMainWindow):
 
     def make_pa_tab(self):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        auto = QtWidgets.QGroupBox("Ekos PAA automatic correction")
+        self.pa_auto_group = auto = QtWidgets.QGroupBox("Ekos PAA automatic correction")
         g = QtWidgets.QGridLayout(auto)
         self.accuracy = QtWidgets.QDoubleSpinBox(); self.accuracy.setRange(5, 3600); self.accuracy.setDecimals(0); self.accuracy.setSuffix('"'); self.accuracy.setValue(float(self.cfg["accuracy_arcsec"]))
         self.alt_offset = QtWidgets.QDoubleSpinBox(); self.alt_offset.setRange(-120,120); self.alt_offset.setDecimals(3); self.alt_offset.setSuffix("′"); self.alt_offset.setValue(float(self.cfg["alt_offset_arcmin"]))
@@ -2226,7 +2239,7 @@ class OATHelper(QtWidgets.QMainWindow):
         note.setWordWrap(True); g.addWidget(note,5,0,1,4)
         v.addWidget(auto)
 
-        manual = QtWidgets.QGroupBox("AutoPA manual control (reuses the existing INDI POLAR_ALT / POLAR_AZ)")
+        self.pa_manual_group = manual = QtWidgets.QGroupBox("AutoPA manual control (reuses the existing INDI POLAR_ALT / POLAR_AZ)")
         mg = QtWidgets.QGridLayout(manual)
         # Ekos states the polar error in degrees/minutes/seconds, so take the
         # same units here instead of making people convert 1°52'00" to 112'.
@@ -2248,7 +2261,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 mg.addWidget(b,row,col)
         v.addWidget(manual)
 
-        pos = QtWidgets.QGroupBox("AutoPA axis position / reference")
+        self.pa_position_group = pos = QtWidgets.QGroupBox("AutoPA axis position / reference")
         pg = QtWidgets.QGridLayout(pos)
         self.pa_pos = QtWidgets.QLabel("AZ: - step | ALT: - step")
         read_pos = QtWidgets.QPushButton("Read current position"); read_pos.clicked.connect(self.read_pa_position)
@@ -2405,18 +2418,35 @@ class OATHelper(QtWidgets.QMainWindow):
 
     # Pages that command the mount. Blocked while the connected mount is not the
     # one the loaded profile describes.
-    # Firmware is not here on purpose: flashing does not move the mount, the
-    # build target check already warns about building the wrong one, and the
-    # page holds the configuration editor - which is how a mismatch gets sorted
-    # out. Its BUILD and FLASH buttons are disabled instead.
-    _MOUNT_TABS = ("Home", "AutoPA", "Monitor", "Axis cal")
+    # What a mismatch actually endangers: controls that replay a number
+    # measured on the other mount, or write one into this profile. Pages are
+    # left alone - the only STOP in the helper is on the Home page, and
+    # disabling it while the mount slews leaves nothing to press. GO TO HOME,
+    # PARK and the jog buttons send the mount nowhere a stored number chose.
+    _REPLAY_CONTROLS = (
+        "dec_restore_btn",          # replays the stored DEC Home travel
+        "restore_on_connect",       # the same, automatically
+        "release_btn",              # moves by the stored shutdown angle
+        "end_session_btn",          # Home, then that same move
+        "dec_manual_save_btn",      # writes a DEC Home offset into this profile
+        "dec_offset_eeprom",        # and onto the mount
+        "cal_save_btn",             # writes an RA correction into this profile
+        "axis_restore_btn",         # restores this profile's steps/degree
+    )
 
     def _set_mount_tabs_enabled(self, enabled):
-        if not hasattr(self, "tabs"):
-            return
-        for index in range(self.tabs.count()):
-            if self.tabs.tabText(index) in self._MOUNT_TABS:
-                self.tabs.setTabEnabled(index, bool(enabled))
+        """Allow or refuse the controls that replay stored per-mount numbers."""
+        why = "" if enabled else _(
+            "The mount connected is not the one profile '{profile}' describes. This would "
+            "replay a distance measured on different hardware, so it is disabled until the "
+            "profile is switched. Moving the mount by hand, GO TO HOME and STOP still "
+            "work.").format(profile=PROFILE)
+        for name in self._REPLAY_CONTROLS:
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            widget.setEnabled(bool(enabled))
+            widget.setToolTip(why)
         self.refresh_build_buttons()
 
     def refresh_build_buttons(self):
@@ -2526,9 +2556,16 @@ class OATHelper(QtWidgets.QMainWindow):
                     "fitted, the build is missing AZ_STEPPER_TYPE and ALT_STEPPER_TYPE in "
                     "Configuration_local.hpp - they default to STEPPER_TYPE_NONE, and the "
                     "firmware will not drive the motors either until those are set.")
+            # Disabling the tab would hide this explanation behind a page that
+            # cannot be opened, which is how "greyed out and I don't know why"
+            # happens. The groups carry it instead.
+            for name in ("pa_auto_group", "pa_manual_group", "pa_position_group"):
+                group = getattr(self, name, None)
+                if group is not None:
+                    group.setEnabled(False)
+                    group.setToolTip(why)
             for index in range(self.tabs.count()):
                 if self.tabs.tabText(index) == "AutoPA":
-                    self.tabs.setTabEnabled(index, False)
                     self.tabs.setTabToolTip(index, why)
 
     def profile_model(self):
@@ -2584,7 +2621,23 @@ class OATHelper(QtWidgets.QMainWindow):
                          f"knows, so the settings profile '{PROFILE}' could not be confirmed. "
                          f"Nothing is blocked.", logging.WARNING)
                 return
-            if model == self.profile_model():
+            mine = self.profile_model()
+            if not mine:
+                # Not the wrong profile - one that has not said which mount it
+                # is for. "New profile..." used to leave it that way, and every
+                # model then disagreed with it.
+                self.cfg["model"] = model
+                try:
+                    self.save_config()
+                except Exception as exc:
+                    self.logger.warning("could not store the adopted model: %s", exc)
+                self.profile_mismatch = False
+                self._set_mount_tabs_enabled(True)
+                if fresh:
+                    self.log(f"Profile '{PROFILE}' had no mount model recorded; it is now set "
+                             f"to {model} from what the mount reports.", logging.WARNING)
+                return
+            if model == mine:
                 self.profile_mismatch = False
                 self._set_mount_tabs_enabled(True)
                 if fresh:
@@ -2615,8 +2668,10 @@ class OATHelper(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self, _("Different mount"),
                 _("The loaded settings profile is '{profile}', but the mount reports "
-                  "{product}.\n\nEverything stored in a profile belongs to one mount, so the "
-                  "pages that move it are disabled.\n\n{advice}").format(
+                  "{product}.\n\nThe controls that replay a stored distance - Restore DEC "
+                  "Home, the shutdown position, SET HOME - are disabled, because those numbers "
+                  "were measured on the other mount. Moving by hand, GO TO HOME and STOP still "
+                  "work.\n\n{advice}").format(
                       profile=PROFILE, product=product, advice=advice))
 
         def failed(exc):

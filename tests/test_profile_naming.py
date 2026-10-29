@@ -89,8 +89,10 @@ def want(label, out, must=(), must_not=()):
 
 PROBE = """
     print("MODEL:", w.profile_model())
-    blocked = [w.tabs.tabText(i) for i in range(w.tabs.count()) if not w.tabs.isTabEnabled(i)]
-    print("BLOCKED:", ",".join(blocked) if blocked else "(none)")
+    # A mismatch blocks the controls that replay a stored distance, not the
+    # pages - the only STOP in the helper lives on the Home page.
+    print("BLOCKED:", "replay" if not w.dec_restore_btn.isEnabled() else "(none)")
+    print("STOP:", "usable" if w.stop_all_btn.isEnabled() else "UNREACHABLE")
     # The advice sits at the end of a long line, so search the whole log rather
     # than printing a truncated copy of it.
     for name in ("oae-field", "oae-test", "oat-pier"):
@@ -114,14 +116,18 @@ out = run("one candidate", "oat-pier", PROBE)
 want("active profile is for the other mount, one candidate", out,
      must=["oae-field"])
 if "BLOCKED: (none)" in out:
-    failures.append("one candidate: the mount pages must still be blocked until the switch")
+    failures.append("one candidate: replaying the stored travel must stay blocked until the switch")
+if "STOP: UNREACHABLE" in out:
+    failures.append("one candidate: STOP must stay reachable")
 
 # --- 3. two profiles fit: name them, change nothing ----------------------
 make_profile("oae-test", "OpenAstroExplorer")
 out = run("two candidates", "oat-pier", PROBE)
 want("two candidates", out, must=["oae-field", "oae-test"])
 if "BLOCKED: (none)" in out:
-    failures.append("two candidates: the mount pages must stay blocked")
+    failures.append("two candidates: replaying the stored travel must stay blocked")
+if "STOP: UNREACHABLE" in out:
+    failures.append("two candidates: STOP must stay reachable")
 
 # --- 4. a profile from before the field falls back to its name -----------
 shutil.rmtree(HOME, ignore_errors=True)

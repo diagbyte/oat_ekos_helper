@@ -148,8 +148,14 @@ assert warned, "a mount that is not the loaded profile must be called out"
 # power-up reaches it twice. A repeat is not news - and for a mismatch it would
 # mean a second modal dialog over the first.
 assert len(warned) == 1, f"the mismatch should be reported once, got {len(warned)}"
-for name in ("Home", "AutoPA"):
-    assert name in blocked, f"{name} must be blocked on a profile mismatch, got {blocked}"
+# The pages stay open: the only STOP in the helper is on the Home page, and
+# disabling it while the mount slews leaves nothing to press. What a mismatch
+# endangers is replaying a distance measured on the other mount.
+assert not blocked, f"no page should be disabled on a mismatch, got {blocked}"
+assert w.stop_all_btn.isEnabled(), "STOP must stay reachable"
+assert w.dec_manual_gohome_btn.isEnabled(), "GO TO HOME chooses no stored distance"
+assert not w.dec_restore_btn.isEnabled(), "replaying the stored DEC Home travel must be blocked"
+assert not w.release_btn.isEnabled(), "the stored shutdown angle must be blocked"
 
 # Firmware is deliberately NOT blocked as a tab: it holds the configuration
 # editor, which is how a mix-up gets sorted out, and flashing does not move the
