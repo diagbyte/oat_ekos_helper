@@ -273,6 +273,15 @@ the expected motor profile is there too, collapsed.
 Building needs no cable; uploading does, so only the upload buttons turn off on
 a machine with no serial device.
 
+**Upload speed** is blank by default, meaning whatever `platformio.ini` sets.
+The ESP32 environments use 460800, which some CP210x and CH340 adapters never
+sync at — esptool then reports `Failed to connect to ESP32: No serial data
+received` with the port open and the chip not answering. Setting 115200, what
+the AVR environments use, is the usual fix; it is stored per profile, so only
+the mount that needs it is slowed down. (This is not `monitor_speed`: the 19200
+there is the rate INDI talks LX200 to the running firmware at, and has nothing
+to do with flashing.)
+
 ### Picking the upload port on a rig with a hub
 
 The upload port offers what is plugged in, stable names first. On a rig where

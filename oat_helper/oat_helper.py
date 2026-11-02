@@ -1146,6 +1146,8 @@ class OATHelper(QtWidgets.QMainWindow):
             # Firmware maintenance (only usable on the machine holding the USB cable)
             "firmware_source_dir": "", "firmware_env": "mksgenlv21", "firmware_port": "/dev/ttyACM0",
             "firmware_ref": "develop", "firmware_last_fetch": "", "latest_release_tag": "",
+            # Blank means platformio.ini's own upload_speed is used.
+            "firmware_upload_speed": "",
             # Show the firmware tab even when no serial port is visible here.
             "always_show_firmware_tab": False,
             # Which mount model this profile is for, as :GVP# reports it. Empty
@@ -1238,6 +1240,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 "firmware_source_dir": self.fw_source.text().strip(),
                 "firmware_env": self.fw_env.currentText().strip(),
                 "firmware_port": self.fw_port.currentText().strip(),
+                "firmware_upload_speed": self.upload_speed_override(),
                 "expected_ra_spr": self.expected_ra_spr.value(),
                 "expected_dec_spr": self.expected_dec_spr.value(),
                 "expected_az_spr": self.expected_az_spr.value(),
@@ -6307,9 +6310,22 @@ class OATHelper(QtWidgets.QMainWindow):
                                   "two adapters that share a by-id name, use by-path and always "
                                   "use the same hub socket."))
         self.fw_port.lineEdit().editingFinished.connect(self.update_local_banner)
+        self.fw_speed=QtWidgets.QComboBox(); self.fw_speed.setEditable(True); self.fw_speed.setMaximumWidth(110)
+        # Blank first, meaning "whatever platformio.ini says".
+        self.fw_speed.addItems(["", "115200", "230400", "460800", "921600"])
+        self.fw_speed.setCurrentText(str(self.cfg.get("firmware_upload_speed", "") or ""))
+        self.fw_speed.setToolTip(_(
+            "Upload speed for the flash, left blank to use the one platformio.ini sets - 460800 "
+            "for the ESP32 environments, which some CP210x and CH340 adapters never sync at: "
+            "esptool then reports 'No serial data received'. 115200 is what the AVR environments "
+            "use and the usual fallback. This is not monitor_speed, the 19200 that INDI talks "
+            "LX200 to the running firmware at."))
         rescan_port=QtWidgets.QPushButton("Rescan"); rescan_port.setToolTip(_("Look for serial devices again"))
         rescan_port.clicked.connect(self.refresh_upload_ports)
-        f.addWidget(QtWidgets.QLabel("Firmware source"),0,0); f.addWidget(self.fw_source,0,1,1,3); f.addWidget(browse,0,4); f.addWidget(QtWidgets.QLabel("PlatformIO env"),1,0); f.addWidget(self.fw_env,1,1); f.addWidget(QtWidgets.QLabel("Upload port"),1,2); f.addWidget(self.fw_port,1,3); f.addWidget(rescan_port,1,4); v.addLayout(f)
+        f.addWidget(QtWidgets.QLabel("Firmware source"),0,0); f.addWidget(self.fw_source,0,1,1,3); f.addWidget(browse,0,4); f.addWidget(QtWidgets.QLabel("PlatformIO env"),1,0); f.addWidget(self.fw_env,1,1); f.addWidget(QtWidgets.QLabel("Upload port"),1,2); f.addWidget(self.fw_port,1,3); f.addWidget(rescan_port,1,4)
+        sp=QtWidgets.QHBoxLayout(); sp.addWidget(QtWidgets.QLabel("Upload speed")); sp.addWidget(self.fw_speed)
+        sp.addWidget(self._hint(_("blank = whatever platformio.ini sets"))); sp.addStretch(1)
+        f.addLayout(sp,2,0,1,5); v.addLayout(f)
         sg=QtWidgets.QGroupBox("Firmware version (git)"); sgl=QtWidgets.QGridLayout(sg)
         self.fw_version_label=QtWidgets.QLabel("Version not checked"); self.fw_version_label.setStyleSheet("font-weight:600"); self.fw_version_label.setWordWrap(True)
         self.fw_mount_label=QtWidgets.QLabel("Mount firmware: -")
@@ -6980,7 +6996,29 @@ class OATHelper(QtWidgets.QMainWindow):
         existing = env.get("PLATFORMIO_BUILD_SRC_FLAGS", "").strip()
         env["PLATFORMIO_BUILD_SRC_FLAGS"] = (
             f"{existing} {self.PIO_WARNING_FLAGS}".strip() if existing else self.PIO_WARNING_FLAGS)
+        # Only when asked for: unset, platformio.ini's own upload_speed stands,
+        # so the value cannot disagree with the file in two places.
+        speed = self.upload_speed_override()
+        if speed:
+            env["PLATFORMIO_UPLOAD_SPEED"] = speed
+        else:
+            env.pop("PLATFORMIO_UPLOAD_SPEED", None)
         return env
+
+    def upload_speed_override(self):
+        """The upload speed to force, or '' to leave the environment's own."""
+        raw = self.fw_speed.currentText().strip() if hasattr(self, "fw_speed") else ""
+        if not raw:
+            return ""
+        try:
+            value = int(raw)
+        except ValueError:
+            self.logger.debug("Ignoring upload speed %r: not a number", raw)
+            return ""
+        if value <= 0:
+            self.logger.debug("Ignoring upload speed %r: not positive", raw)
+            return ""
+        return str(value)
 
     def _build_job(self,source_text,env):
         exe,pio=self._install_platformio()
