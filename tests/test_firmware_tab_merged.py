@@ -96,6 +96,9 @@ PROBE = """
     print("EDIT_ENABLED:", bool(w.config_edit_btn.isEnabled()))
     fw = [i for i in range(w.tabs.count()) if w.tabs.tabText(i) == "Firmware"]
     print("FW_TAB_ENABLED:", bool(fw) and w.tabs.isTabEnabled(fw[0]))
+    # isVisible() is False for anything on a tab that is not the current one,
+    # so ask whether it was explicitly hidden.
+    print("OAE_USB_NOTE:", not w.fw_oae_note.isHidden())
 """
 
 # --- 1. one tab, and it names the file -----------------------------------
@@ -142,5 +145,16 @@ if failures:
     for line in failures:
         print("FAIL:", line)
     raise AssertionError(f"{len(failures)} problem(s)")
+# --- 4. the Explorer's PCB USB cannot flash, and only it is told so ------
+# Flashing through the main PCB leaves esptool at "No serial data received";
+# the ESP32 module's own socket works. That costs an evening to find out.
+setup()
+out = run("oae note", PROBE)
+report("Explorer profile", out, {"OAE_USB_NOTE": True})
+
+setup(profile="oat-pier", model="OpenAstroTracker")
+out = run("oat note", PROBE, product="OpenAstroTracker")
+report("Tracker profile", out, {"OAE_USB_NOTE": False})
+
 print()
 print("firmware page: one tab, and it says what it will flash")

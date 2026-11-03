@@ -87,18 +87,50 @@ check("OAE profile, OAE env, OAE define", False)
 w.imported_defines = {"OAM": 1}
 check("OAE profile but OAM define", True, ("OAM",))
 
+# --- a profile named something other than its model ----------------------
+# Profile names became free-form, so the name is no longer the model. Keying
+# the comparison on the name made every correctly set up Explorer profile warn
+# about itself: nothing matches "oae-field", so the OAE define it does carry
+# looks like the wrong one and the oaeboardv1 environment looks unexpected.
+print()
+named = w._firmware_target_warnings(model="OpenAstroExplorer", env="oaeboardv1",
+                                    defines={"OAE": 1, "RA_STEPPER_SPR": 400},
+                                    name="oae-field")
+print("named profile, all correct ->", len(named), "warning(s)")
+for line in named:
+    print("        -", line[:118])
+assert not named, f"a correct Explorer setup must be quiet whatever the profile is called: {named}"
+
+# The name is still what the message calls it, since that is what the header shows.
+missing = w._firmware_target_warnings(model="OpenAstroExplorer", env="oaeboardv1",
+                                      defines={"RA_STEPPER_SPR": 400}, name="oae-field")
+print("named profile, no OAE define ->", len(missing), "warning(s)")
+for line in missing:
+    print("        -", line[:118])
+assert missing, "a missing OAE define must still be caught"
+assert any("oae-field" in line for line in missing), (
+    "the warning should name the profile the way the header does")
+
+# An unlabelled profile cannot be compared against; saying nothing beats guessing.
+unknown = w._firmware_target_warnings(model="", env="oaeboardv1",
+                                      defines={"OAE": 1}, name="whatever")
+print("unlabelled profile ->", len(unknown), "warning(s)")
+for line in unknown:
+    print("        -", line[:118])
+assert not unknown, f"nothing is known about this profile's mount, so nothing to say: {unknown}"
+
 print()
 # --- an OAT profile with an OAE env is the mirror image ------------------
 # PROFILE is fixed at import, so check the comparison itself rather than
 # restarting the app for the other direction.
-mirror = w._firmware_target_warnings(profile="OpenAstroTracker", env="oaeboardv1",
+mirror = w._firmware_target_warnings(model="OpenAstroTracker", env="oaeboardv1",
                                      defines={"OAE": 1})
 print("OAT profile, OAE env, OAE define ->", len(mirror), "warning(s)")
 for line in mirror:
     print("        -", line[:118])
 assert mirror, "an OAT profile flashing an OAE build must be called out"
 
-clean = w._firmware_target_warnings(profile="OpenAstroTracker", env="mksgenlv21",
+clean = w._firmware_target_warnings(model="OpenAstroTracker", env="mksgenlv21",
                                     defines={"RA_STEPPER_SPR": 400})
 print("OAT profile, AVR env, no define   ->", len(clean), "warning(s)")
 assert not clean, f"a plain OAT build is the default and must be quiet: {clean}"

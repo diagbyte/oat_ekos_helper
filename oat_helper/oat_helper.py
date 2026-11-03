@@ -350,7 +350,7 @@ _STATUS_LABEL_ATTRS = (
 
 
 class IndiClient(QtCore.QObject):
-    """Small INDI XML client focused on the OAT properties we need."""
+    """Small INDI XML client focused on the mount properties we need."""
 
     connectionChanged = QtCore.pyqtSignal(bool, str)
     logMessage = QtCore.pyqtSignal(str)
@@ -519,7 +519,7 @@ class IndiClient(QtCore.QObject):
         return buf[:end], buf[end:]
 
     def _clear_oat_property_cache(self, name=None):
-        """Forget deleted/redefined OAT properties so reconnects cannot use stale vectors."""
+        """Forget deleted/redefined mount properties so reconnects cannot use stale vectors."""
         names = None if not name else {str(name)}
         if names is None:
             self.seen_properties = {item for item in self.seen_properties if item[0] != self.device}
@@ -567,7 +567,7 @@ class IndiClient(QtCore.QObject):
                 if not name:
                     self.device_connected = None
                 self.logMessage.emit(
-                    f"INDI property removed: {dev}.{name or '*'}; cached OAT vectors invalidated")
+                    f"INDI property removed: {dev}.{name or '*'}; cached mount vectors invalidated")
             return
 
         if dev and name and dev not in self.known_devices:
@@ -588,7 +588,7 @@ class IndiClient(QtCore.QObject):
         )
         if dev and looks_oat and dev != self.device and "OpenAstro" in dev:
             self.device = dev
-            self.logMessage.emit(f"Auto-detected OAT INDI device: {dev}")
+            self.logMessage.emit(f"Auto-detected mount INDI device: {dev}")
             self.deviceDetected.emit(dev)
 
         if dev != self.device:
@@ -637,7 +637,7 @@ class IndiClient(QtCore.QObject):
                     self.device_connected = connected
                     self.mountConnectionChanged.emit(bool(connected))
                     self.logMessage.emit(
-                        f"OAT mount CONNECTION={'Connected' if connected else 'Disconnected'}")
+                        f"Mount CONNECTION={'Connected' if connected else 'Disconnected'}")
                     if not connected:
                         # CONNECTION itself remains defined, but operational
                         # vectors are about to be deleted/redefined.
@@ -1419,7 +1419,7 @@ class OATHelper(QtWidgets.QMainWindow):
 
     @staticmethod
     def usb_serial_present():
-        """True when some serial device that could be the OAT exists here."""
+        """True when some serial device that could be the mount exists here."""
         patterns = ("/dev/ttyACM*", "/dev/ttyUSB*", "/dev/ttyAMA*", "/dev/serial/by-id/*")
         for pattern in patterns:
             directory, _, glob = pattern.rpartition("/")
@@ -1748,7 +1748,7 @@ class OATHelper(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
 
         intro = self._hint(
-            "After power-on, work through (1) to (5) in order. Keep the OAT base pointing north and do not turn it by hand - "
+            "After power-on, work through (1) to (5) in order. Keep the mount base pointing north and do not turn it by hand - "
             "AutoPA moves motors only during the correction step, and use Slew in KStars when pointing south.")
         v.addWidget(intro)
 
@@ -1921,16 +1921,16 @@ class OATHelper(QtWidgets.QMainWindow):
         self.wizard_paa_guidance_seen = True
         self.update_wizard_status()
         text = _(
-            "1) Leave the OAT base pointing north and do not rotate the whole OAT by hand. AutoPA moves it with motors during automatic correction only.\n\n"
+            "1) Leave the mount base pointing north and do not rotate the whole mount by hand. AutoPA moves it with motors during automatic correction only.\n\n"
             "2) In the KStars sky map, pick a star or star field actually visible through the southern window and press [Slew]. "
-            "You issue the Slew command and the OAT moves RA/DEC automatically.\n\n"
+            "You issue the Slew command and the mount moves RA/DEC automatically.\n\n"
             "3) In Ekos Guide, turn Loop on, check that several stars are visible and focus the guider.\n\n"
             "4) Open Ekos > Align > Polar Alignment Assistant. You do not need to see the pole. "
             "Turn Auto Slew on and start with a rotation of about 20°. For East/West, pick the side that is not blocked by a window frame or wall during the two RA rotations.\n\n"
             "5) Once the PAA measurement starts, Ekos rotates the RA axis twice and plate-solves three frames.\n\n"
             "6) Start Refresh in the PAA correction screen. Once you have pressed [Start auto correction] here, "
-            "OAT Helper reads each new Refresh result and moves AutoPA ALT/AZ automatically.\n\n"
-            "7) When a new Refresh result is at or below the target accuracy, OAT Helper shows Ready.")
+            "The helper reads each new Refresh result and moves AutoPA ALT/AZ automatically.\n\n"
+            "7) When a new Refresh result is at or below the target accuracy, the helper shows Ready.")
         QtWidgets.QMessageBox.information(self, _("Starting the Ekos PAA"), text)
 
     def wizard_start_autopa(self):
@@ -2720,6 +2720,7 @@ class OATHelper(QtWidgets.QMainWindow):
                 self.profile_mismatch = False
                 self._set_mount_tabs_enabled(True)
                 self.refresh_profile_badge()
+                self.refresh_oae_note()
                 if fresh:
                     self.log(f"Profile '{PROFILE}' had no mount model recorded; it is now set "
                              f"to {model} from what the mount reports.", logging.WARNING)
@@ -2783,7 +2784,7 @@ class OATHelper(QtWidgets.QMainWindow):
             self.firmware_version_num = self._parse_firmware_version(text)
             if hasattr(self, "fw_label"):
                 self.fw_label.setText(f"FW: {text or '-'}")
-            self.log(f"OAT firmware version: {text or 'unknown'}")
+            self.log(f"Mount firmware version: {text or 'unknown'}")
             self._apply_version_gating()
             self.read_dec_limits()
         self.run_async(job, done, lambda e: self.log(f"Failed to read the firmware version: {e}", logging.WARNING))
@@ -4049,7 +4050,7 @@ class OATHelper(QtWidgets.QMainWindow):
             text = (
                 f"Lat {info['lat']:.4f}°  Lon {info['lon']:.4f}° | "
                 f"LST {self._hours_to_hms(info['lst'])} | "
-                f"OAT HA {self._hours_to_hms(info['ha'])}"
+                f"Mount HA {self._hours_to_hms(info['ha'])}"
             )
             if hasattr(self, "ha_status"):
                 self.ha_status.setText(_("✓ ") + text)
@@ -4121,7 +4122,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if hasattr(self, "mount_status"):
             self._set_status_dot(self.mount_status, bool(connected), "Mount")
         if connected:
-            self.log("OAT mount reconnected; requesting fresh INDI property definitions.")
+            self.log("The mount reconnected; requesting fresh INDI property definitions.")
             # Treat a mount (re)connect as a possible power cycle: :GX# DEC is
             # zero at the physical power-on position again.
             self.dec_zero_shift = 0
@@ -4137,9 +4138,9 @@ class OATHelper(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(1700, self.check_mount_profile)
             QtCore.QTimer.singleShot(2000, self.refresh_mount_capabilities)
         else:
-            self.log("OAT mount disconnected; cached AutoPA properties were invalidated.", logging.WARNING)
+            self.log("The mount disconnected; cached AutoPA properties were invalidated.", logging.WARNING)
             if self.pa_motion_active:
-                self._abort_pa_motion("OAT mount disconnected during AutoPA movement.")
+                self._abort_pa_motion("The mount disconnected during AutoPA movement.")
 
     def on_device_list_changed(self, devices):
         """Keep the picker in sync with what the INDI server announces."""
@@ -4226,8 +4227,8 @@ class OATHelper(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(1200, lambda: self.check_oat_properties(attempt + 1))
             return
         if missing:
-            self.log("Missing OAT INDI properties: " + ", ".join(missing) + f". Current device={self.indi.device!r}. "
-                     "If Diagnostics still works, this is only a property-discovery mismatch; OAT Helper will keep retrying.", logging.WARNING)
+            self.log("Missing mount INDI properties: " + ", ".join(missing) + f". Current device={self.indi.device!r}. "
+                     "If Diagnostics still works, this is only a property-discovery mismatch; the helper will keep retrying.", logging.WARNING)
         else:
             self.log(f"LX200 OpenAstroTech properties detected: "
                      f"Meade={self.indi.meade_vector}.{self.indi.meade_element}, "
@@ -6225,6 +6226,11 @@ class OATHelper(QtWidgets.QMainWindow):
         self.refresh_config_path_label()
         return w
 
+    def refresh_oae_note(self):
+        """The PCB-USB warning is only true of the Explorer."""
+        if hasattr(self, "fw_oae_note"):
+            self.fw_oae_note.setVisible(self.profile_model() == "OpenAstroExplorer")
+
     def refresh_config_path_label(self):
         """Say which file a build would use, and what is in it."""
         if not hasattr(self, "config_path_label"):
@@ -6252,8 +6258,8 @@ class OATHelper(QtWidgets.QMainWindow):
     def make_diag_tab(self):
         w=QtWidgets.QWidget(); v=QtWidgets.QVBoxLayout(w)
         # (This used to be defined twice; the second definition silently replaced
-        # the first, so 'Refresh OAT status' and the log folder never showed up.)
-        top=QtWidgets.QHBoxLayout(); b=QtWidgets.QPushButton("Refresh OAT status"); b.setObjectName("primary"); b.clicked.connect(self.refresh_diagnostics)
+        # the first, so 'Refresh mount status' and the log folder never showed up.)
+        top=QtWidgets.QHBoxLayout(); b=QtWidgets.QPushButton("Refresh mount status"); b.setObjectName("primary"); b.clicked.connect(self.refresh_diagnostics)
         b.setToolTip("Reads firmware, steps/degree, limits, clock and site from the mount without changing anything.")
         logs=QtWidgets.QPushButton("Open the log folder"); logs.clicked.connect(lambda: os.system(f'xdg-open "{LOG_DIR}" >/dev/null 2>&1 &'))
         top.addWidget(b); top.addWidget(logs); top.addStretch(1); v.addLayout(top)
@@ -6303,6 +6309,10 @@ class OATHelper(QtWidgets.QMainWindow):
         self.fw_port=QtWidgets.QComboBox(); self.fw_port.setEditable(True); self.fw_port.setMinimumWidth(240)
         self.fw_port.addItems(self._serial_port_candidates())
         self.fw_port.setCurrentText(self.cfg.get("firmware_port","/dev/ttyACM0"))
+        self.fw_oae_note = self._hint(_(
+            "OpenAstroExplorer: flash through the ESP32 module's own USB socket, not the USB on "
+            "the main PCB. Through the PCB the chip never enters its bootloader and esptool "
+            "stops with 'Failed to connect to ESP32: No serial data received'."), warn=True)
         self.fw_port.setToolTip(_("The serial device to upload to. A /dev/serial/by-id name is "
                                   "built from the adapter's serial number and stays the same "
                                   "across reboots; ttyUSB0 is handed out in enumeration order and "
@@ -6325,7 +6335,8 @@ class OATHelper(QtWidgets.QMainWindow):
         f.addWidget(QtWidgets.QLabel("Firmware source"),0,0); f.addWidget(self.fw_source,0,1,1,3); f.addWidget(browse,0,4); f.addWidget(QtWidgets.QLabel("PlatformIO env"),1,0); f.addWidget(self.fw_env,1,1); f.addWidget(QtWidgets.QLabel("Upload port"),1,2); f.addWidget(self.fw_port,1,3); f.addWidget(rescan_port,1,4)
         sp=QtWidgets.QHBoxLayout(); sp.addWidget(QtWidgets.QLabel("Upload speed")); sp.addWidget(self.fw_speed)
         sp.addWidget(self._hint(_("blank = whatever platformio.ini sets"))); sp.addStretch(1)
-        f.addLayout(sp,2,0,1,5); v.addLayout(f)
+        f.addLayout(sp,2,0,1,5)
+        f.addWidget(self.fw_oae_note,3,0,1,5); v.addLayout(f)
         sg=QtWidgets.QGroupBox("Firmware version (git)"); sgl=QtWidgets.QGridLayout(sg)
         self.fw_version_label=QtWidgets.QLabel("Version not checked"); self.fw_version_label.setStyleSheet("font-weight:600"); self.fw_version_label.setWordWrap(True)
         self.fw_mount_label=QtWidgets.QLabel("Mount firmware: -")
@@ -6359,6 +6370,7 @@ class OATHelper(QtWidgets.QMainWindow):
         v.addLayout(prog)
         fr=QtWidgets.QGroupBox("Factory Reset / EEPROM Clear"); fg=QtWidgets.QGridLayout(fr); self.factory_cmd=QtWidgets.QLineEdit(FACTORY_RESET_COMMAND); self.factory_cmd.setReadOnly(True); self.factory_cmd.setToolTip("The firmware has exactly one factory reset command (:XFR#); it is not editable."); self.factory_confirm=QtWidgets.QLineEdit(); self.factory_confirm.setPlaceholderText("Type RESET"); rb=QtWidgets.QPushButton("FACTORY RESET"); rb.setObjectName("danger"); rb.clicked.connect(self.factory_reset); fg.addWidget(QtWidgets.QLabel("Command"),0,0); fg.addWidget(self.factory_cmd,0,1,1,3); fg.addWidget(QtWidgets.QLabel("Confirm"),1,0); fg.addWidget(self.factory_confirm,1,1); fg.addWidget(rb,1,2,1,2); v.addWidget(fr)
         self.fw_output=QtWidgets.QPlainTextEdit(); self.fw_output.setReadOnly(True); self.fw_output.setMinimumHeight(140); self.fw_output.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)); v.addWidget(self.fw_output,1)
+        self.refresh_oae_note()
         return w
 
     def update_local_banner(self):
@@ -6366,7 +6378,7 @@ class OATHelper(QtWidgets.QMainWindow):
         """Say plainly that flashing only works on the machine holding the USB cable."""
         if not hasattr(self, "local_banner"):
             return
-        text = _("Run this extension on the computer the OAT is plugged into: Build and Flash "
+        text = _("Run this extension on the computer the mount is plugged into: Build and Flash "
                  "drive PlatformIO over the USB serial port. Configuration editing, firmware "
                  "version management and diagnostics also work over the network.")
         port = self.fw_port.currentText().strip() if hasattr(self, "fw_port") else ""
@@ -6430,7 +6442,7 @@ class OATHelper(QtWidgets.QMainWindow):
             except Exception as exc: QtWidgets.QMessageBox.warning(self,_("Configuration"),str(exc))
 
     def edit_configuration_file(self):
-        text=FIRMWARE_CONFIG.read_text(encoding="utf-8",errors="replace") if FIRMWARE_CONFIG.exists() else "// Configuration_local.hpp\n// Importing your existing OAT configuration file and editing only the needed #defines is recommended.\n"
+        text=FIRMWARE_CONFIG.read_text(encoding="utf-8",errors="replace") if FIRMWARE_CONFIG.exists() else "// Configuration_local.hpp\n// Importing your existing configuration file and editing only the needed #defines is recommended.\n"
         d=QtWidgets.QDialog(self); d.setWindowTitle(_("Edit Configuration_local.hpp")); d.resize(900,700); lay=QtWidgets.QVBoxLayout(d); ed=QtWidgets.QPlainTextEdit(); ed.setPlainText(text); ed.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)); lay.addWidget(ed,1); row=QtWidgets.QHBoxLayout(); save=QtWidgets.QPushButton("Back up and save"); cancel=QtWidgets.QPushButton("Cancel"); row.addStretch(1); row.addWidget(save); row.addWidget(cancel); lay.addLayout(row); cancel.clicked.connect(d.reject); save.clicked.connect(d.accept)
         if d.exec_()==QtWidgets.QDialog.Accepted:
             if FIRMWARE_CONFIG.exists(): shutil.copy2(FIRMWARE_CONFIG,self._configuration_backup_path())
@@ -6874,7 +6886,7 @@ class OATHelper(QtWidgets.QMainWindow):
         if QtWidgets.QMessageBox.warning(
                 self,_("Restore source"),
                 _("This discards all local changes in the firmware source and returns it to the current "
-                  "version.\n(Configuration_local.hpp is stored separately in the OAT Firmware settings "
+                  "version.\n(Configuration_local.hpp is stored separately in the profile's settings "
                   "folder and is preserved.)\nContinue?"),
                 QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)!=QtWidgets.QMessageBox.Yes:
             return
@@ -7035,19 +7047,30 @@ class OATHelper(QtWidgets.QMainWindow):
     # two are set separately and can disagree.
     _PROFILE_DEFINE = {"OpenAstroMount": "OAM", "OpenAstroExplorer": "OAE"}
 
-    def _firmware_target_warnings(self, profile=None, env=None, defines=None):
-        """Check the profile, the PlatformIO environment and the product define agree.
+    def _firmware_target_warnings(self, model=None, env=None, defines=None, name=None):
+        """Check the profile's mount, the PlatformIO environment and the define agree.
+
+        Compares on the model, not the profile's name: names are free-form, so
+        "oae-field" says nothing about which mount it is for. The messages use
+        the name, because that is what the header shows and what has to be
+        changed.
 
         Asks the mount nothing, so it works on a board with no firmware on it -
         which is exactly when it matters, before the first flash.
         """
-        profile = PROFILE if profile is None else profile
+        model = self.profile_model() if model is None else model
+        name = PROFILE if name is None else name
         if env is None:
             env = self.fw_env.currentText().strip() if hasattr(self, "fw_env") else ""
         if defines is None:
             defines = getattr(self, "imported_defines", None) or {}
+        # A profile that has not said which mount it is for cannot be compared
+        # against; it adopts one on the first connect.
+        if not model:
+            return []
 
-        wanted = self._PROFILE_DEFINE.get(profile)
+        profile = name
+        wanted = self._PROFILE_DEFINE.get(model)
         present = [d for d in self._PROFILE_DEFINE.values() if d in defines]
         # Only oaeboardv1 is an Explorer board today; match on the name so a
         # renamed or added Explorer environment is still recognised.
@@ -7072,12 +7095,12 @@ class OATHelper(QtWidgets.QMainWindow):
                              "mount under Settings and import it there instead.").format(
                                  define=other, profile=profile))
 
-        if profile == "OpenAstroExplorer" and env and not env_is_oae:
+        if model == "OpenAstroExplorer" and env and not env_is_oae:
             out.append(_("The '{profile}' profile is loaded but the PlatformIO environment is "
                          "'{env}'. The Explorer board is the ESP32 'oaeboardv1' environment; an "
                          "AVR environment cannot be uploaded to it.").format(
                              profile=profile, env=env))
-        elif profile != "OpenAstroExplorer" and env_is_oae:
+        elif model != "OpenAstroExplorer" and env_is_oae:
             out.append(_("The PlatformIO environment '{env}' builds for the Explorer board, but "
                          "the '{profile}' profile is loaded. Everything here - this environment, "
                          "the upload port, Configuration_local.hpp - is stored against "

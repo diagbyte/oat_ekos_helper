@@ -97,7 +97,7 @@ else:
     failures.append("restore should go through one shared path that takes a copy")
 
 # --- 4. the build warning says what to do about it -----------------------
-warnings = w._firmware_target_warnings(profile="OpenAstroTracker", env="oaeboardv1",
+warnings = w._firmware_target_warnings(model="OpenAstroTracker", env="oaeboardv1",
                                        defines={"OAE": 1})
 print()
 print("build-target warnings :", len(warnings))

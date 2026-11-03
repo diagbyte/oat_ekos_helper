@@ -66,7 +66,7 @@ for model, wanted in (("OpenAstroExplorer", "oaeboardv1"),
 # catch a real disagreement, not to greet every new profile.
 seed = w.defaults_for_model("OpenAstroExplorer")
 warnings = w._firmware_target_warnings(
-    profile="OpenAstroExplorer", env=seed["firmware_env"], defines={"OAE": 1})
+    model="OpenAstroExplorer", env=seed["firmware_env"], defines={"OAE": 1})
 print()
 print("warnings on a fresh Explorer profile:", len(warnings))
 for line in warnings:

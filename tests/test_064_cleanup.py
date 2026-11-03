@@ -98,7 +98,9 @@ print("DEC limit here: wrong side / Home refused, right side sent: OK")
 
 # ---- 4. UI clean-up ---------------------------------------------------------
 diag = buttons(w.diag_tab)
-assert "Refresh OAT status" in diag and "Open the log folder" in diag, diag
+# The label generalised with the rest: the helper drives a Tracker, a Mount
+# or an Explorer, so the text says "mount".
+assert "Refresh mount status" in diag and "Open the log folder" in diag, diag
 assert "Go Home" not in diag and "Set Home" not in diag, diag
 assert "DEC limits" in diag
 print("diag tab: read-only refresh restored, Go Home / Set Home quick buttons gone")

@@ -273,6 +273,12 @@ the expected motor profile is there too, collapsed.
 Building needs no cable; uploading does, so only the upload buttons turn off on
 a machine with no serial device.
 
+**On an OpenAstroExplorer, flash through the ESP32 module's own USB socket,
+not the USB on the main PCB.** Through the PCB the chip never enters its
+bootloader and esptool stops with `Failed to connect to ESP32: No serial data
+received`, with the port open and nothing answering. The Firmware page says so
+when an Explorer profile is loaded.
+
 **Upload speed** is blank by default, meaning whatever `platformio.ini` sets.
 The ESP32 environments use 460800, which some CP210x and CH340 adapters never
 sync at — esptool then reports `Failed to connect to ESP32: No serial data
